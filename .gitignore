@@ -1,0 +1,13 @@
+.env
+agenthub.db
+*.sqlite
+*.db
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+uvicorn*.log
+workspaces/
+tmp_phase5_source_repo*/
+tmp_phase7_source_repo*/
+previews/
