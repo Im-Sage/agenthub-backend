@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,16 +9,15 @@ from app.db.session import get_db
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.user import User
+from app.schemas.enums import SenderType
 from app.schemas.message import MessageCreate, MessageRead, WebSocketMessageEvent
 from app.services.task_service import (
     broadcast_task_event,
     create_mock_task_from_message,
     create_orchestrator_tasks_from_message,
     create_qwen_task_from_message,
-    run_mock_agent_task,
-    run_orchestrator_task,
-    run_qwen_agent_task,
 )
+from app.workers import agent_tasks
 
 
 router = APIRouter()
@@ -46,14 +45,13 @@ def list_messages(
 @router.post("/messages", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
 async def create_message(
     payload: MessageCreate,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Message:
     conversation = ensure_owned_conversation(db, payload.conversation_id, current_user.id)
     message = Message(
         conversation_id=conversation.id,
-        sender_type="user",
+        sender_type=SenderType.USER,
         sender_id=current_user.id,
         content=payload.content,
         message_type=payload.message_type,
@@ -70,20 +68,20 @@ async def create_message(
         parent_task, child_tasks = orchestrator_tasks
         await broadcast_task_event(parent_task, "task.created")
         for child_task in child_tasks:
-            await broadcast_task_event(child_task, "task.created")
-        background_tasks.add_task(run_orchestrator_task, parent_task.id)
+            await broadcast_task_event(child_task, "kidstask.created")
+        agent_tasks.run_orchestrator_task.delay(parent_task.id)  # 异步执行任务
         return message
 
     qwen_task = create_qwen_task_from_message(db, conversation, payload.content)
     if qwen_task is not None:
         await broadcast_task_event(qwen_task, "task.created")
-        background_tasks.add_task(run_qwen_agent_task, qwen_task.id)
+        agent_tasks.run_agent_task.delay(qwen_task.id)
         return message
 
     mock_task = create_mock_task_from_message(db, conversation, payload.content)
     if mock_task is not None:
         await broadcast_task_event(mock_task, "task.created")
-        background_tasks.add_task(run_mock_agent_task, mock_task.id)
+        agent_tasks.run_agent_task.delay(mock_task.id)
 
     return message
 

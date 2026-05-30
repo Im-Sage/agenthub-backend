@@ -5,6 +5,7 @@ from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.user import Base
+from app.schemas.enums import CodeChangeStatus
 
 if TYPE_CHECKING:
     from app.models.repository import Repository
@@ -22,7 +23,7 @@ class CodeChange(Base):
     commit_hash: Mapped[str | None] = mapped_column(String(100), nullable=True)
     changed_files: Mapped[str] = mapped_column(Text, nullable=False)
     diff_text: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="generated", index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default=CodeChangeStatus.GENERATED, index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     task: Mapped["Task"] = relationship()

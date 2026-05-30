@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from fastapi import HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from app.models.agent import Agent
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.task import Task
+from app.schemas.enums import TaskStatus, MessageType, SenderType, AgentAdapterType
 from app.schemas.message import MessageRead, WebSocketMessageEvent
 from app.schemas.task import TaskEvent, TaskRead
 
@@ -139,7 +141,7 @@ def create_single_agent_task_from_message(
     task = Task(
         conversation_id=conversation.id,
         agent_id=agent.id,
-        status="PENDING",
+        status=TaskStatus.PENDING,
         instruction=instruction,
     )
     db.add(task)
@@ -214,139 +216,42 @@ async def broadcast_agent_message(message: Message) -> None:
     await websocket_manager.broadcast_json(message.conversation_id, jsonable_encoder(event))
 
 
-async def run_single_agent_task(task_id: int, create_reply_message: bool = True) -> None:
-    db = SessionLocal()
-    try:
-        task = db.get(Task, task_id)
-        if task is None:
-            return
-
-        task.status = "RUNNING"
-        db.commit()
-        db.refresh(task)
-        await broadcast_task_event(task, "task.updated")
-
-        agent = db.get(Agent, task.agent_id)
-        if agent is None:
-            raise RuntimeError("任务关联的 Agent 不存在。")
-
-        adapter = get_adapter(agent)
-        result = await adapter.run(
-            AgentRunRequest(
-                task_id=task.id,
-                conversation_id=task.conversation_id,
-                instruction=task.instruction,
-                context={"system_prompt": agent.system_prompt or ""},
-            )
-        )
-
-        task.status = "SUCCESS" if result.status == "success" else "FAILED"
-        task.result_summary = result.summary
-        db.commit()
-        db.refresh(task)
-        await broadcast_task_event(task, "task.updated")
-
-        if create_reply_message:
-            agent_message = Message(
-                conversation_id=task.conversation_id,
-                sender_type="agent",
-                sender_id=task.agent_id,
-                content=result.summary,
-                message_type="text",
-            )
-            db.add(agent_message)
-            db.commit()
-            db.refresh(agent_message)
-            await broadcast_agent_message(agent_message)
-    except Exception as exc:
-        task = db.get(Task, task_id)
-        if task is not None:
-            task.status = "FAILED"
-            task.error_message = str(exc)
-            db.commit()
-            db.refresh(task)
-            await broadcast_task_event(task, "task.updated")
-    finally:
-        db.close()
-
-
-async def run_mock_agent_task(task_id: int) -> None:
-    await run_single_agent_task(task_id, create_reply_message=True)
-
-
-async def run_qwen_agent_task(task_id: int) -> None:
-    await run_single_agent_task(task_id, create_reply_message=True)
-
-
-async def run_orchestrator_task(parent_task_id: int) -> None:
-    db = SessionLocal()
-    try:
-        parent_task = db.get(Task, parent_task_id)
-        if parent_task is None:
-            return
-
-        parent_task.status = "RUNNING"
-        db.commit()
-        db.refresh(parent_task)
-        await broadcast_task_event(parent_task, "task.updated")
-
-        child_ids = list(
-            db.scalars(
-                select(Task.id)
-                .where(Task.parent_task_id == parent_task.id)
-                .order_by(Task.id.asc())
-            )
-        )
-    finally:
-        db.close()
-
-    for child_id in child_ids:
-        await run_single_agent_task(child_id, create_reply_message=True)
-
-    db = SessionLocal()
-    try:
-        parent_task = db.get(Task, parent_task_id)
-        if parent_task is None:
-            return
-
-        child_tasks = list(
-            db.scalars(
-                select(Task)
-                .where(Task.parent_task_id == parent_task.id)
-                .order_by(Task.id.asc())
-            )
-        )
-        failed_tasks = [task for task in child_tasks if task.status == "FAILED"]
-        if failed_tasks:
-            parent_task.status = "FAILED"
-            parent_task.error_message = "存在子任务执行失败。"
-        else:
-            parent_task.status = "SUCCESS"
-            parent_task.result_summary = build_orchestrator_summary(parent_task, child_tasks)
-
-        db.commit()
-        db.refresh(parent_task)
-        await broadcast_task_event(parent_task, "task.updated")
-
-        if parent_task.result_summary:
-            summary_message = Message(
-                conversation_id=parent_task.conversation_id,
-                sender_type="agent",
-                sender_id=parent_task.agent_id,
-                content=parent_task.result_summary,
-                message_type="text",
-            )
-            db.add(summary_message)
-            db.commit()
-            db.refresh(summary_message)
-            await broadcast_agent_message(summary_message)
-    finally:
-        db.close()
-
-
 def build_orchestrator_summary(parent_task: Task, child_tasks: list[Task]) -> str:
     lines = [f"Orchestrator 已完成任务拆解与执行：{parent_task.instruction}"]
     for index, task in enumerate(child_tasks, start=1):
         lines.append(f"{index}. 子任务 {task.id}：{task.result_summary or task.instruction}")
     return "\n".join(lines)
+
+
+def list_tasks(db: Session, user_id: int, conversation_id: int) -> list[Task]:
+    from app.models.conversation import Conversation
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
+
+    statement = (
+        select(Task)
+        .where(Task.conversation_id == conversation_id)
+        .order_by(Task.created_at.asc(), Task.id.asc())
+    )
+    return list(db.scalars(statement))
+
+
+def get_task(db: Session, user_id: int, task_id: int) -> Task:
+    from app.models.conversation import Conversation
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+
+    conversation = db.get(Conversation, task.conversation_id)
+    if conversation is None or conversation.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+
+    return task
+
+
+def list_child_tasks(db: Session, user_id: int, task_id: int) -> list[Task]:
+    parent_task = get_task(db, user_id, task_id)
+    statement = select(Task).where(Task.parent_task_id == parent_task.id).order_by(Task.id.asc())
+    return list(db.scalars(statement))
 

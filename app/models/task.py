@@ -5,6 +5,7 @@ from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.user import Base
+from app.schemas.enums import TaskStatus
 
 if TYPE_CHECKING:
     from app.models.agent import Agent
@@ -28,7 +29,7 @@ class Task(Base):
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, nullable=False)
     parent_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
     agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"), index=True, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default=TaskStatus.PENDING, index=True, nullable=False)
     instruction: Mapped[str] = mapped_column(Text, nullable=False)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

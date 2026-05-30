@@ -1,5 +1,6 @@
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
@@ -22,6 +23,14 @@ PREVIEW_ROOT = PROJECT_ROOT / "previews"
 PREVIEW_ROOT.mkdir(exist_ok=True)
 
 app = FastAPI(title=settings.app_name)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(conversations.router, prefix="/api/conversations", tags=["会话"])

@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     secret_key: str = "agenthub-dev-secret-key"
     access_token_expire_minutes: int = 60 * 24
     database_url: str = "sqlite:///./agenthub.db"
+    redis_url: str = "redis://localhost:6379/0"
 
     aliyun_api_key: str | None = None
     aliyun_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

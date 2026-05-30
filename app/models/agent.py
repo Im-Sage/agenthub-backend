@@ -4,6 +4,7 @@ from sqlalchemy import Boolean, DateTime, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.user import Base
+from app.schemas.enums import AgentAdapterType
 
 """
 Agent模型参数定义
@@ -21,7 +22,7 @@ class Agent(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     code: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
-    adapter_type: Mapped[str] = mapped_column(String(50), default="mock", nullable=False)
+    adapter_type: Mapped[str] = mapped_column(String(50), default=AgentAdapterType.MOCK, nullable=False)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     capabilities: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
