@@ -55,8 +55,12 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
         repo_path = None
         conversation = db.get(Conversation, task.conversation_id)
         if conversation:
-            # 找到该用户的第一个可用仓库
-            repo = db.scalar(select(Repository).where(Repository.user_id == conversation.user_id))
+            # 找到该用户最新添加的一个可用仓库 (优先使用最新的，避免用到旧的测试桩)
+            repo = db.scalar(
+                select(Repository)
+                .where(Repository.user_id == conversation.user_id)
+                .order_by(Repository.id.desc())
+            )
             if repo:
                 repo_path = repo.local_path
 

@@ -160,4 +160,29 @@ class WorkspaceService:
         except Exception as e:
             raise WorkspaceError(f"获取 commit hash 失败: {e}")
 
+    def push_branch(self, local_path: str, branch_name: str) -> None:
+        """推送分支到远程仓库"""
+        workspace_path = Path(local_path)
+        self.ensure_git_repo(workspace_path)
+        
+        try:
+            repo = Repo(workspace_path)
+            origin = repo.remote(name='origin')
+            # 使用 settings 中的 github_token 构造带 auth 的 URL 来推送 (仅支持 HTTPS)
+            from app.core.config import settings
+            if settings.github_token:
+                remote_url = origin.url
+                if remote_url.startswith("https://"):
+                    auth_url = remote_url.replace("https://", f"https://x-access-token:{settings.github_token}@")
+                    origin.set_url(auth_url)
+                    
+            origin.push(refspec=f'{branch_name}:{branch_name}')
+            
+            # 恢复原始 URL 以免泄露 Token
+            if settings.github_token and remote_url.startswith("https://"):
+                origin.set_url(remote_url)
+                
+        except GitCommandError as e:
+            raise WorkspaceError(f"推送分支失败: {e}")
+
 workspace_service = WorkspaceService()

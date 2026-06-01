@@ -115,6 +115,8 @@ async def generate_code_change(db: Session, task: Task, repository: Repository) 
     return code_change
 
 
+from app.services.github_service import github_service, GitHubError
+
 def create_pull_request_from_code_change(
     db: Session,
     code_change: CodeChange,
@@ -126,14 +128,32 @@ def create_pull_request_from_code_change(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="仓库不存在")
 
     try:
-        workspace_service.prepare_branch(repository.local_path, repository.default_branch, code_change.branch_name)
+        # 1. 直接提交变更（因为 generate 阶段已经写好文件并 add 过了，千万不要再 reset）
+        from git import Repo
+        repo = Repo(repository.local_path)
+        repo.git.checkout(code_change.branch_name)
+        
         commit_hash = workspace_service.commit_changes(repository.local_path, title)
+        
+        # 2. 推送分支到远程仓库
+        workspace_service.push_branch(repository.local_path, code_change.branch_name)
+
+        # 3. 调用 GitHub API 创建真实 PR
+        pr_info = github_service.create_pull_request(
+            repo_url=repository.repo_url,
+            title=title,
+            body=body or f"Auto-generated PR by AgentHub for task {code_change.task_id}",
+            head_branch=code_change.branch_name,
+            base_branch=repository.default_branch
+        )
+
     except WorkspaceError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except GitHubError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     code_change.commit_hash = commit_hash
     code_change.status = "committed"
-
     db.commit()
     db.refresh(code_change)
 
@@ -145,13 +165,14 @@ def create_pull_request_from_code_change(
         commit_hash=commit_hash,
         title=title,
         body=body,
-        pr_url=f"agenthub://repos/{repository.id}/pulls/{code_change.branch_name}",
+        pr_url=pr_info["html_url"],
         status="created",
     )
     db.add(pull_request)
     db.commit()
     db.refresh(pull_request)
     return pull_request
+
 
 
 def reset_workspace_for_test(path: Path) -> None:

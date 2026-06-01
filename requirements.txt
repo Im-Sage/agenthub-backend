@@ -6,6 +6,7 @@ pydantic-settings==2.7.1
 celery
 redis
 GitPython
+PyGithub
 email-validator==2.2.0
 python-multipart==0.0.20
 passlib[bcrypt]==1.7.4

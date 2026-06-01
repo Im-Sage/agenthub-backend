@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     aliyun_model: str = "qwen-plus"
     aliyun_timeout_seconds: float = 120.0
 
+    github_token: str | None = None
+
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8")
 
     @property
