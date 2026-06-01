@@ -7,7 +7,5 @@ __pycache__/
 .pytest_cache/
 .venv/
 uvicorn*.log
+workspacesw
 workspaces/
-tmp_phase5_source_repo*/
-tmp_phase7_source_repo*/
-previews/

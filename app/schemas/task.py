@@ -10,9 +10,12 @@ class TaskRead(BaseModel):
     parent_task_id: int | None
     agent_id: int
     status: str
+    task_type: str | None = None
     instruction: str
-    result_summary: str | None
-    error_message: str | None
+    depends_on: str | None = None
+    result_summary: str | None = None
+    error_message: str | None = None
+    metadata_json: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     aliyun_api_key: str | None = None
     aliyun_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     aliyun_model: str = "qwen-plus"
-    aliyun_timeout_seconds: float = 60.0
+    aliyun_timeout_seconds: float = 120.0
 
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8")
 

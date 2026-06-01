@@ -2,9 +2,7 @@ import asyncio
 from sqlalchemy import select
 from app.workers.celery_app import celery_app
 from app.db.session import SessionLocal
-from app.models.task import Task
-from app.models.agent import Agent
-from app.models.message import Message
+from app.models import Task, Agent, Message, Repository, Conversation
 from app.schemas.enums import TaskStatus, SenderType, MessageType
 from app.agents.base import AgentRunRequest
 from app.services import task_service
@@ -50,6 +48,18 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
 
         adapter = task_service.get_adapter(agent)
         
+        # 获取工作空间上下文 (这里先简化处理：获取用户最近的一个仓库，后续可以扩展为会话关联仓库)
+        from app.models.repository import Repository
+        from app.models.conversation import Conversation
+        
+        repo_path = None
+        conversation = db.get(Conversation, task.conversation_id)
+        if conversation:
+            # 找到该用户的第一个可用仓库
+            repo = db.scalar(select(Repository).where(Repository.user_id == conversation.user_id))
+            if repo:
+                repo_path = repo.local_path
+
         # 调用异步适配器
         result = sync_run_async(
             adapter.run(
@@ -57,6 +67,7 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
                     task_id=task.id,
                     conversation_id=task.conversation_id,
                     instruction=task.instruction,
+                    repo_path=repo_path,
                     context={"system_prompt": agent.system_prompt or ""},
                 )
             )
@@ -85,15 +96,40 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
             
         return f"Task {task_id} completed: {task.status}"
     except Exception as exc:
+        db.rollback()  # 发生异常时回滚，确保后续更新能成功
+        error_detail = f"{type(exc).__name__}: {str(exc)}" if str(exc) else repr(exc)
+        print(f"[Worker] Task {task_id} raised exception: {error_detail}")
         task = db.get(Task, task_id)
         if task is not None:
             task.status = TaskStatus.FAILED
-            task.error_message = str(exc)
+            task.error_message = error_detail
             db.commit()
-        return f"Task {task_id} failed: {str(exc)}"
+            sync_run_async(task_service.broadcast_task_event(task, "task.updated"))
+        return f"Task {task_id} failed: {error_detail}"
     finally:
         db.close()
 
+
+import json
+import re
+
+def clean_json_response(content: str) -> str:
+    """清理 LLM 返回的 JSON 字符串（更稳健的处理方式）"""
+    # 1. 尝试匹配标准的 markdown JSON 代码块
+    pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+    match = re.search(pattern, content)
+    if match:
+        return match.group(1).strip()
+    
+    # 2. 如果没找到代码块，尝试通过找首尾的 [ 和 ] 来抠出 JSON 数组
+    # 这个正则寻找第一个 [ 和最后一个 ] 之间的所有内容
+    pattern_bracket = r"(\[[\s\S]*\])"
+    match_bracket = re.search(pattern_bracket, content)
+    if match_bracket:
+        return match_bracket.group(1).strip()
+
+    # 3. 兜底：直接返回原始字符串
+    return content.strip()
 
 @celery_app.task(name="app.workers.agent_tasks.run_orchestrator_task")
 def run_orchestrator_task(parent_task_id: int):
@@ -106,29 +142,58 @@ def run_orchestrator_task(parent_task_id: int):
         parent_task.status = TaskStatus.RUNNING
         db.commit()
         db.refresh(parent_task)
-        # 实时推送：父任务开始运行
         sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
 
-        child_ids = list(
-            db.scalars(
-                select(Task.id)
-                .where(Task.parent_task_id == parent_task.id)
-                .order_by(Task.id.asc())
+        # 1. 运行 Orchestrator Agent 获取拆解方案 (JSON)
+        agent = db.get(Agent, parent_task.agent_id)
+        adapter = task_service.get_adapter(agent)
+        
+        run_result = sync_run_async(
+            adapter.run(
+                AgentRunRequest(
+                    task_id=parent_task.id,
+                    conversation_id=parent_task.conversation_id,
+                    instruction=f"请拆解以下目标：{parent_task.instruction}",
+                    context={"system_prompt": agent.system_prompt or ""},
+                )
             )
         )
-    finally:
-        db.close()
 
-    # 顺序执行子任务
-    for child_id in child_ids:
-        run_agent_task(child_id, create_reply_message=True)
+        # 2. 解析 JSON 并创建子任务
+        try:
+            plan_json = clean_json_response(run_result.summary)
+            subtasks_data = json.loads(plan_json)
+            if not isinstance(subtasks_data, list):
+                raise ValueError("LLM 返回的不是 JSON 数组")
+            
+            child_ids = []
+            for item in subtasks_data:
+                child_task = task_service.create_subtask(
+                    db=db,
+                    parent_task=parent_task,
+                    agent_code=item.get("agent", "backend"),
+                    instruction=item.get("instruction", ""),
+                    task_type="dynamic_subtask"
+                )
+                child_ids.append(child_task.id)
+                # 推送子任务创建事件
+                sync_run_async(task_service.broadcast_task_event(child_task, "task.created"))
+            
+            db.commit()
+        except Exception as e:
+            parent_task.status = TaskStatus.FAILED
+            parent_task.error_message = f"解析方案失败: {e}\n原始回复: {run_result.summary}"
+            db.commit()
+            sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
+            return f"Failed to parse plan: {e}"
 
-    db = SessionLocal()
-    try:
-        parent_task = db.get(Task, parent_task_id)
-        if parent_task is None:
-            return
+        # 3. 顺序执行生成的子任务
+        for child_id in child_ids:
+            # 可以在这里根据 depends_on 做更复杂的逻辑，目前先简单顺序执行
+            run_agent_task(child_id, create_reply_message=True)
 
+        # 4. 汇总结果
+        db.refresh(parent_task)
         child_tasks = list(
             db.scalars(
                 select(Task)
@@ -136,17 +201,21 @@ def run_orchestrator_task(parent_task_id: int):
                 .order_by(Task.id.asc())
             )
         )
-        failed_tasks = [task for task in child_tasks if task.status == TaskStatus.FAILED]
+        failed_tasks = [t for t in child_tasks if t.status == TaskStatus.FAILED]
         if failed_tasks:
             parent_task.status = TaskStatus.FAILED
-            parent_task.error_message = "存在子任务执行失败。"
+            # 汇总所有失败子任务的错误信息，处理 error_message 为 None 的情况
+            errors = []
+            for t in failed_tasks:
+                msg = t.error_message or t.result_summary or "无详细错误信息"
+                errors.append(f"子任务 {t.id} ({t.instruction[:20]}...): {msg}")
+            parent_task.error_message = "子任务执行失败：\n" + "\n".join(errors)
         else:
             parent_task.status = TaskStatus.SUCCESS
             parent_task.result_summary = task_service.build_orchestrator_summary(parent_task, child_tasks)
 
         db.commit()
         db.refresh(parent_task)
-        # 实时推送：父任务执行完成
         sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
 
         if parent_task.result_summary:
@@ -160,9 +229,14 @@ def run_orchestrator_task(parent_task_id: int):
             db.add(summary_message)
             db.commit()
             db.refresh(summary_message)
-            # 实时推送：父任务总结消息
             sync_run_async(task_service.broadcast_agent_message(summary_message))
             
-        return f"Orchestrator Task {parent_task_id} completed"
+        return f"Orchestrator Task {parent_task_id} completed with {len(child_ids)} subtasks"
+    except Exception as exc:
+        if 'parent_task' in locals() and parent_task:
+            parent_task.status = TaskStatus.FAILED
+            parent_task.error_message = str(exc)
+            db.commit()
+        return f"Orchestrator Task {parent_task_id} failed: {str(exc)}"
     finally:
         db.close()

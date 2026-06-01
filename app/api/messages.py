@@ -63,14 +63,12 @@ async def create_message(
     event = WebSocketMessageEvent(data=MessageRead.model_validate(message))
     await websocket_manager.broadcast_json(conversation.id, jsonable_encoder(event))
 
-    orchestrator_tasks = create_orchestrator_tasks_from_message(db, conversation, payload.content)
-    if orchestrator_tasks is not None:
-        parent_task, child_tasks = orchestrator_tasks
-        await broadcast_task_event(parent_task, "task.created")
-        for child_task in child_tasks:
-            await broadcast_task_event(child_task, "kidstask.created")
-        agent_tasks.run_orchestrator_task.delay(parent_task.id)  # 异步执行任务
+    orchestrator_task = create_orchestrator_tasks_from_message(db, conversation, payload.content)
+    if orchestrator_task is not None:
+        await broadcast_task_event(orchestrator_task, "task.created")
+        agent_tasks.run_orchestrator_task.delay(orchestrator_task.id)
         return message
+
 
     qwen_task = create_qwen_task_from_message(db, conversation, payload.content)
     if qwen_task is not None:

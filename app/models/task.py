@@ -30,9 +30,12 @@ class Task(Base):
     parent_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
     agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"), index=True, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default=TaskStatus.PENDING, index=True, nullable=False)
+    task_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    depends_on: Mapped[str | None] = mapped_column(Text, nullable=True)  # 存储 JSON 数组，如 "[1, 2]"
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # 存储任务元数据
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
