@@ -13,9 +13,13 @@ class DeploymentRead(BaseModel):
     task_id: int
     code_change_id: int
     provider: str
-    preview_url: str
+    external_id: str | None = None
+    preview_url: str | None = None
     status: str
-    logs: str | None
+    build_logs: str | None = None
+    deploy_logs: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

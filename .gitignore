@@ -9,3 +9,4 @@ __pycache__/
 uvicorn*.log
 workspacesw
 workspaces/
+previews/

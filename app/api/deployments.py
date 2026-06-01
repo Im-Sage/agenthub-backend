@@ -5,12 +5,12 @@ from sqlalchemy.orm import Session
 
 from app.api.code_changes import get_owned_code_change, get_owned_task
 from app.api.deps import get_current_user
-from app.core.websocket_manager import websocket_manager
+from app.core.broadcaster import broadcaster
 from app.db.session import get_db
 from app.models.deployment import Deployment
 from app.models.user import User
 from app.schemas.deployment import DeploymentCreate, DeploymentEvent, DeploymentRead
-from app.services.deployment_service import create_preview_deployment
+from app.services import deployment_service
 
 
 router = APIRouter()
@@ -23,10 +23,10 @@ async def create_deployment(
     db: Session = Depends(get_db),
 ) -> Deployment:
     code_change = get_owned_code_change(db, payload.code_change_id, current_user.id)
-    deployment = create_preview_deployment(db, code_change, payload.provider)
+    deployment = deployment_service.create_local_deployment(db, code_change.id)
     task = get_owned_task(db, deployment.task_id, current_user.id)
     event = DeploymentEvent(data=DeploymentRead.model_validate(deployment))
-    await websocket_manager.broadcast_json(task.conversation_id, jsonable_encoder(event))
+    await broadcaster.publish(f"conv_{task.conversation_id}", jsonable_encoder(event))
     return deployment
 
 
