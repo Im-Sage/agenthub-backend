@@ -7,5 +7,6 @@
     <mapping directory="$PROJECT_DIR$/workspaces/repo-3" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/workspaces/repo-4" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/workspaces/repo-5" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/repo-6" vcs="Git" />
   </component>
 </project>

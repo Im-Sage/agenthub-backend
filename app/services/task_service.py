@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.agents.base import AgentAdapter, AgentRunRequest
 from app.agents.mock_adapter import MockAgentAdapter
 from app.agents.qwen_adapter import QwenAgentAdapter
-from app.core.websocket_manager import websocket_manager
+from app.core.broadcaster import broadcaster
 from app.db.session import SessionLocal
 from app.models.agent import Agent
 from app.models.conversation import Conversation
@@ -207,13 +207,14 @@ def create_orchestrator_tasks_from_message(
 
 
 async def broadcast_task_event(task: Task, event_name: str) -> None:
+    print(f"[TaskService] Broadcasting event: {event_name} for task {task.id}")
     event = TaskEvent(event=event_name, data=TaskRead.model_validate(task))
-    await websocket_manager.broadcast_json(task.conversation_id, jsonable_encoder(event))
+    await broadcaster.publish(f"conv_{task.conversation_id}", jsonable_encoder(event))
 
 
 async def broadcast_agent_message(message: Message) -> None:
     event = WebSocketMessageEvent(data=MessageRead.model_validate(message))
-    await websocket_manager.broadcast_json(message.conversation_id, jsonable_encoder(event))
+    await broadcaster.publish(f"conv_{message.conversation_id}", jsonable_encoder(event))
 
 
 def build_orchestrator_summary(parent_task: Task, child_tasks: list[Task]) -> str:

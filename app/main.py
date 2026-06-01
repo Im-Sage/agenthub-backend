@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,12 +18,22 @@ from app.api import (
 )
 from app.core.config import PROJECT_ROOT, settings
 from app.db import base  # noqa: F401
+from app.core.broadcaster import broadcaster
+from app.core.websocket_manager import websocket_manager
 
 
 PREVIEW_ROOT = PROJECT_ROOT / "previews"
 PREVIEW_ROOT.mkdir(exist_ok=True)
 
-app = FastAPI(title=settings.app_name)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时：开始订阅 Redis 频道
+    await broadcaster.subscribe("conv_*", websocket_manager.broadcast_json)
+    yield
+    # 关闭时：清理连接
+    await broadcaster.stop()
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

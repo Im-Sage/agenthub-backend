@@ -25,7 +25,7 @@ async def generate_task_code_change(
 ) -> CodeChange:
     task = get_owned_task(db, payload.task_id, current_user.id)
     repository = get_owned_repository(db, payload.repository_id, current_user.id)
-    code_change = generate_code_change(db, task, repository)
+    code_change = await generate_code_change(db, task, repository)
     event = CodeChangeEvent(data=CodeChangeRead.model_validate(code_change))
     await websocket_manager.broadcast_json(task.conversation_id, jsonable_encoder(event))
     return code_change

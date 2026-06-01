@@ -11,13 +11,19 @@ from app.services import task_service
 
 
 def sync_run_async(coro):
-    """在同步环境运行异步协程的辅助函数"""
-    loop = asyncio.get_event_loop()
+    """在同步环境运行异步协程的稳健辅助函数"""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
     if loop.is_running():
-        # 如果当前已经有运行中的 loop（比如在某些测试环境），直接运行
+        # 如果当前已有运行中的 loop，将协程提交到该 loop
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
     else:
-        return asyncio.run(coro)
+        # 如果有 loop 但未运行，直接运行直到完成
+        return loop.run_until_complete(coro)
 
 """
 负责单个 Agent 的异步执行，
@@ -35,7 +41,8 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
         task.status = TaskStatus.RUNNING
         db.commit()
         db.refresh(task)
-        # TODO: Phase 3 - 发送 WebSocket 推送 (task.updated)
+        # 实时推送：任务进入运行状态
+        sync_run_async(task_service.broadcast_task_event(task, "task.updated"))
 
         agent = db.get(Agent, task.agent_id)
         if agent is None:
@@ -59,9 +66,9 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
         task.result_summary = result.summary
         db.commit()
         db.refresh(task)
-        # TODO: Phase 3 - 发送 WebSocket 推送 (task.updated)
+        # 实时推送：任务执行完成
+        sync_run_async(task_service.broadcast_task_event(task, "task.updated"))
 
-        # 创建 Agent 消息
         if create_reply_message:
             agent_message = Message(
                 conversation_id=task.conversation_id,
@@ -73,7 +80,8 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
             db.add(agent_message)
             db.commit()
             db.refresh(agent_message)
-            # TODO: Phase 3 - 发送 WebSocket 推送 (message.created)
+            # 实时推送：Agent 回复消息
+            sync_run_async(task_service.broadcast_agent_message(agent_message))
             
         return f"Task {task_id} completed: {task.status}"
     except Exception as exc:
@@ -98,7 +106,8 @@ def run_orchestrator_task(parent_task_id: int):
         parent_task.status = TaskStatus.RUNNING
         db.commit()
         db.refresh(parent_task)
-        # TODO: Phase 3 - 发送 WebSocket 推送 (task.updated)
+        # 实时推送：父任务开始运行
+        sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
 
         child_ids = list(
             db.scalars(
@@ -137,7 +146,8 @@ def run_orchestrator_task(parent_task_id: int):
 
         db.commit()
         db.refresh(parent_task)
-        # TODO: Phase 3 - 发送 WebSocket 推送 (task.updated)
+        # 实时推送：父任务执行完成
+        sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
 
         if parent_task.result_summary:
             summary_message = Message(
@@ -150,7 +160,8 @@ def run_orchestrator_task(parent_task_id: int):
             db.add(summary_message)
             db.commit()
             db.refresh(summary_message)
-            # TODO: Phase 3 - 发送 WebSocket 推送 (message.created)
+            # 实时推送：父任务总结消息
+            sync_run_async(task_service.broadcast_agent_message(summary_message))
             
         return f"Orchestrator Task {parent_task_id} completed"
     finally:

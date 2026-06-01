@@ -1,0 +1,25 @@
+ <!DOCTYPE html>
+ <html>
+ <head><title>AgentHub 实时监控测试</title></head>
+ <body>
+     <h2>WebSocket 实时日志</h2>
+     <div id="logs" style="border:1px solid #ccc; height:400px; overflow:y-scroll; background:#000; color:#0f0; padding:10px;
+ font-family:monospace;">
+     </div>
+     <script>
+         const convId = 22; // 替换为你的会话 ID
+         const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxNzgwMjk1MjM2fQ.F2pBCz89g2hUPOpZ7L70_Ndu-QzxEjPbu3JYvS2qaB0"; // 替换为你的 Access Token
+
+         const ws = new WebSocket(`ws://127.0.0.1:8000/ws/conversations/${convId}?token=${token}`);
+         const logDiv = document.getElementById('logs');
+
+         ws.onopen = () => logDiv.innerHTML += "<p>> 已连接到服务器...</p>";
+         ws.onmessage = (e) => {
+             const data = JSON.parse(e.data);
+             logDiv.innerHTML += `<p style="color:#fff;">[收到事件] ${data.event || 'message'}: ${JSON.stringify(data.data)}</p>`;
+             logDiv.scrollTop = logDiv.scrollHeight;
+         };
+         ws.onclose = () => logDiv.innerHTML += "<p style='color:red;'>> 连接已断开</p>";
+     </script>
+ </body>
+</html>
