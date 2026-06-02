@@ -19,14 +19,18 @@ class QwenAgentAdapter(AgentAdapter):
         # 如果有工作区路径，注入开发者能力的指令
         if request.repo_path:
             base_system_prompt += (
-                f"\n\n你现在正在操作一个真实的本地仓库，路径为：{request.repo_path}\n"
-                "如果你需要修改或创建文件，请使用以下格式：\n"
+                f"\n\n【重要：你拥有文件系统操作权限】\n"
+                f"当前工作区绝对路径：{request.repo_path}\n"
+                "作为 AI 程序员，你的主要目标是通过修改代码解决问题。请遵循以下规则：\n"
+                "1. 只要涉及代码编写，必须使用该格式包裹代码：\n"
                 "[FILE: 相对路径]\n"
                 "```代码语言\n"
                 "代码内容\n"
                 "```\n"
-                "你可以一次性修改多个文件。请确保只输出必要的代码和简短的说明。"
+                "2. 尽量减少解释性文字，优先确保代码正确落盘。\n"
+                "3. 绝对不要输出没有 [FILE: ] 标记的代码块。"
             )
+
 
         payload = {
             "model": settings.aliyun_model,

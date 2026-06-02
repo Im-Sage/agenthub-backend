@@ -7,7 +7,17 @@ from app.schemas.conversation import ConversationCreate, ConversationUpdate
 
 
 def create_conversation(db: Session, user_id: int, payload: ConversationCreate) -> Conversation:
-    conversation = Conversation(user_id=user_id, title=payload.title, type=payload.type)
+    # 验证如果传了 repository_id，该仓库必须属于该用户
+    if payload.repository_id is not None:
+        from app.services.repo_service import get_owned_repository
+        get_owned_repository(db, payload.repository_id, user_id)
+
+    conversation = Conversation(
+        user_id=user_id, 
+        repository_id=payload.repository_id,
+        title=payload.title, 
+        type=payload.type
+    )
     db.add(conversation)
     db.commit()
     db.refresh(conversation)

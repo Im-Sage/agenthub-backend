@@ -69,35 +69,27 @@ def generated_file_for_task(workspace_path: Path, task_id: int) -> Path:
 async def generate_code_change(db: Session, task: Task, repository: Repository) -> CodeChange:
     branch_name = f"agent-task-{task.id}"
     
+    # 注意：这里我们不再调用 adapter.run(request)
+    # 因为 Agent 在 run_agent_task 异步任务中已经完成了文件写入
+    # 我们这里只负责捕捉 Git 状态
+    
     try:
-        workspace_service.prepare_branch(repository.local_path, repository.default_branch, branch_name)
-    except WorkspaceError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        # 1. 确保在正确的分支（不执行 reset，保留 Agent 的修改）
+        from git import Repo
+        repo = Repo(repository.local_path)
+        repo.git.checkout('-B', branch_name)
+        
+        # 将所有新文件和修改加入暂存区，确保后续的 Diff 和 Changed files 能捕捉到
+        repo.git.add(A=True)
 
-    # 让 Agent 真实修改代码
-    from app.models.agent import Agent
-    from app.agents.base import AgentRunRequest
-    from app.services.task_service import get_adapter
-
-    agent = db.get(Agent, task.agent_id)
-    if agent:
-        adapter = get_adapter(agent)
-        request = AgentRunRequest(
-            task_id=task.id,
-            conversation_id=task.conversation_id,
-            instruction=task.instruction,
-            repo_path=repository.local_path,
-            branch_name=branch_name,
-            context={"system_prompt": agent.system_prompt or ""}
-        )
-        await adapter.run(request)
-
-    try:
+        # 2. 获取变更文件列表和差异
         changed_files = workspace_service.get_changed_files(repository.local_path)
         diff_text = workspace_service.get_diff(repository.local_path)
         commit_hash = workspace_service.get_commit_hash(repository.local_path)
     except WorkspaceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Git operation failed: {e}")
 
     code_change = CodeChange(
         task_id=task.id,
@@ -129,9 +121,13 @@ def create_pull_request_from_code_change(
 
     try:
         # 1. 直接提交变更（因为 generate 阶段已经写好文件并 add 过了，千万不要再 reset）
-        from git import Repo
+        from git import Repo, GitCommandError
         repo = Repo(repository.local_path)
-        repo.git.checkout(code_change.branch_name)
+        try:
+            repo.git.checkout(code_change.branch_name)
+        except GitCommandError:
+            # 如果分支不存在，可能是被清理了，尝试创建并切换
+            repo.git.checkout('-B', code_change.branch_name)
         
         commit_hash = workspace_service.commit_changes(repository.local_path, title)
         

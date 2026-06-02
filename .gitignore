@@ -10,3 +10,9 @@ uvicorn*.log
 workspacesw
 workspaces/
 previews/
+test_repo/
+test_repo2/
+alembic/
+
+# Frontend
+agenthub-frontend/

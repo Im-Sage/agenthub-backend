@@ -68,9 +68,9 @@ class WorkspaceService:
         
         try:
             repo = Repo(workspace_path)
-            # 1. (调试阶段注释掉) 强制清理未提交的杂质
-            # repo.git.reset('--hard')
-            # repo.git.clean('-fd')
+            # 1. 强制清理未提交的杂质，确保 Agent 环境纯净
+            repo.git.reset('--hard')
+            repo.git.clean('-fd')
             
             # 2. 尝试切换到基准分支
             try:
@@ -91,18 +91,11 @@ class WorkspaceService:
         
         try:
             repo = Repo(workspace_path)
-            # 添加所有变更到暂存区
+            # 强制将所有变更（包括 untracked 文件）添加到暂存区
             repo.git.add(A=True)
             
-            # 检查是否有任何提交
-            try:
-                repo.git.rev_parse('--verify', 'HEAD')
-                # 有提交，正常对比
-                diff = repo.git.diff("HEAD")
-            except GitCommandError:
-                # 没有任何提交（空仓库），对比空树哈希 (empty tree hash)
-                # 或者直接获取当前暂存区的所有内容作为新增
-                diff = repo.git.diff("--cached", "4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+            # 使用 --cached 对比暂存区和 HEAD，确保新添加的文件也能被 diff 捕捉到
+            diff = repo.git.diff("--cached")
             return diff
         except GitCommandError as e:
             raise WorkspaceError(f"获取 diff 失败: {e}")
@@ -114,12 +107,11 @@ class WorkspaceService:
         
         try:
             repo = Repo(workspace_path)
-            try:
-                repo.git.rev_parse('--verify', 'HEAD')
-                changed_files = repo.git.diff('--name-only', 'HEAD').splitlines()
-            except GitCommandError:
-                # 空仓库，显示所有已暂存的文件
-                changed_files = repo.git.ls_files().splitlines()
+            # 强制加入暂存区，确保 untracked 被捕获
+            repo.git.add(A=True)
+            
+            # 使用 --cached 获取所有被暂存的修改和新增文件
+            changed_files = repo.git.diff('--name-only', '--cached').splitlines()
             
             return [f for f in changed_files if f]
         except GitCommandError as e:
