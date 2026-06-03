@@ -3,8 +3,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.code_changes import get_owned_code_change, get_owned_task
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_owned_code_change, get_owned_task
 from app.core.broadcaster import broadcaster
 from app.db.session import get_db
 from app.models.deployment import Deployment

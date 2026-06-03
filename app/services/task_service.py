@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 
 from fastapi import HTTPException, status
 from fastapi.encoders import jsonable_encoder
@@ -237,6 +238,19 @@ async def broadcast_task_event(task: Task, event_name: str) -> None:
     await broadcaster.publish(f"conv_{task.conversation_id}", jsonable_encoder(event))
 
 
+async def broadcast_task_log(task: Task, message: str) -> None:
+    """发送实时执行日志给前端"""
+    log_event = {
+        "event": "task.log",
+        "data": {
+            "task_id": task.id,
+            "message": message,
+            "timestamp": datetime.now().isoformat()
+        }
+    }
+    await broadcaster.publish(f"conv_{task.conversation_id}", log_event)
+
+
 async def broadcast_agent_message(message: Message) -> None:
     event = WebSocketMessageEvent(data=MessageRead.model_validate(message))
     await broadcaster.publish(f"conv_{message.conversation_id}", jsonable_encoder(event))
@@ -250,10 +264,7 @@ def build_orchestrator_summary(parent_task: Task, child_tasks: list[Task]) -> st
 
 
 def list_tasks(db: Session, user_id: int, conversation_id: int) -> list[Task]:
-    from app.models.conversation import Conversation
-    conversation = db.get(Conversation, conversation_id)
-    if conversation is None or conversation.user_id != user_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
+    get_owned_conversation(db, conversation_id, user_id)
 
     statement = (
         select(Task)
@@ -264,14 +275,11 @@ def list_tasks(db: Session, user_id: int, conversation_id: int) -> list[Task]:
 
 
 def get_task(db: Session, user_id: int, task_id: int) -> Task:
-    from app.models.conversation import Conversation
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
 
-    conversation = db.get(Conversation, task.conversation_id)
-    if conversation is None or conversation.user_id != user_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    get_owned_conversation(db, task.conversation_id, user_id)
 
     return task
 

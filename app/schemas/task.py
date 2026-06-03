@@ -12,6 +12,7 @@ class TaskRead(BaseModel):
     status: str
     task_type: str | None = None
     instruction: str
+    celery_task_id: str | None = None
     depends_on: str | None = None
     result_summary: str | None = None
     error_message: str | None = None

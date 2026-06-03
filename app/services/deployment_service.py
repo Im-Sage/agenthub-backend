@@ -54,8 +54,8 @@ def create_local_deployment(db: Session, code_change_id: int) -> Deployment:
         db.commit()
 
         # 2. 准备预览目录
-        # 路径规划: /previews/repo_{repo_id}/task_{task_id}/
-        preview_dir = PREVIEW_ROOT / f"repo_{repository.id}" / f"task_{code_change.task_id}"
+        # 路径规划: /previews/user_{user_id}/repo_{repo_id}/task_{task_id}/
+        preview_dir = PREVIEW_ROOT / f"user_{repository.user_id}" / f"repo_{repository.id}" / f"task_{code_change.task_id}"
         _clean_preview_dir(preview_dir)
 
         # 3. 模拟“构建”过程（目前简单粗暴地将工作区文件复制到预览目录）
@@ -75,9 +75,7 @@ def create_local_deployment(db: Session, code_change_id: int) -> Deployment:
         build_logs.append("Files copied successfully.")
         
         # 4. 生成可访问的 URL (由 app/main.py 的 StaticFiles 托管)
-        # 例如: http://127.0.0.1:8000/previews/repo_1/task_106/index.html
-        # 注意：这里我们默认入口是根目录，实际上前端可以在卡片上提供不同的文件链接
-        preview_url = f"/previews/repo_{repository.id}/task_{code_change.task_id}/"
+        preview_url = f"/previews/user_{repository.user_id}/repo_{repository.id}/task_{code_change.task_id}/"
 
         # 5. 更新状态为成功
         deployment.status = DeploymentStatus.SUCCESS

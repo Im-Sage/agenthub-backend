@@ -3,7 +3,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_owned_conversation
 from app.core.websocket_manager import websocket_manager
 from app.db.session import get_db
 from app.models.conversation import Conversation
@@ -31,7 +31,7 @@ def list_messages(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[Message]:
-    ensure_owned_conversation(db, conversation_id, current_user.id)
+    get_owned_conversation(db, conversation_id, current_user.id)
     statement = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
@@ -48,7 +48,7 @@ async def create_message(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Message:
-    conversation = ensure_owned_conversation(db, payload.conversation_id, current_user.id)
+    conversation = get_owned_conversation(db, payload.conversation_id, current_user.id)
     message = Message(
         conversation_id=conversation.id,
         sender_type=SenderType.USER,
@@ -65,28 +65,31 @@ async def create_message(
 
     orchestrator_task = create_orchestrator_tasks_from_message(db, conversation, payload.content)
     if orchestrator_task is not None:
+        # 确保提交任务到数据库后再发送广播
+        db.commit()
         await broadcast_task_event(orchestrator_task, "task.created")
-        agent_tasks.run_orchestrator_task.delay(orchestrator_task.id)
+        result = agent_tasks.run_orchestrator_task.delay(orchestrator_task.id)
+        # 保存 Celery ID 到数据库以便后续取消
+        orchestrator_task.celery_task_id = result.id
+        db.commit()
         return message
-
 
     qwen_task = create_qwen_task_from_message(db, conversation, payload.content)
     if qwen_task is not None:
+        db.commit()
         await broadcast_task_event(qwen_task, "task.created")
-        agent_tasks.run_agent_task.delay(qwen_task.id)
+        result = agent_tasks.run_agent_task.delay(qwen_task.id)
+        qwen_task.celery_task_id = result.id
+        db.commit()
         return message
 
     mock_task = create_mock_task_from_message(db, conversation, payload.content)
     if mock_task is not None:
+        db.commit()
         await broadcast_task_event(mock_task, "task.created")
-        agent_tasks.run_agent_task.delay(mock_task.id)
+        result = agent_tasks.run_agent_task.delay(mock_task.id)
+        mock_task.celery_task_id = result.id
+        db.commit()
 
     return message
-
-
-def ensure_owned_conversation(db: Session, conversation_id: int, user_id: int) -> Conversation:
-    conversation = db.get(Conversation, conversation_id)
-    if conversation is None or conversation.user_id != user_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
-    return conversation
 

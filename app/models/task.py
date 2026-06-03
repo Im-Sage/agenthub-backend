@@ -32,6 +32,7 @@ class Task(Base):
     status: Mapped[str] = mapped_column(String(30), default=TaskStatus.PENDING, index=True, nullable=False)
     task_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     depends_on: Mapped[str | None] = mapped_column(Text, nullable=True)  # 存储 JSON 数组，如 "[1, 2]"
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

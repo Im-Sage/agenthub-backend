@@ -6,6 +6,7 @@ from app.models import Task, Agent, Message, Repository, Conversation
 from app.schemas.enums import TaskStatus, SenderType, MessageType
 from app.agents.base import AgentRunRequest
 from app.services import task_service
+from app.services.workspace_service import workspace_service
 
 
 def sync_run_async(coro):
@@ -58,6 +59,10 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
             repo = db.get(Repository, conversation.repository_id)
             if repo:
                 repo_path = repo.local_path
+                # 准备工作区分支并清理历史干扰 (Phase 10 鲁棒性增强)
+                sync_run_async(workspace_service.prepare_branch(
+                    repo_path, repo.default_branch, f"agent-task-{task.id}", task=task
+                ))
 
         # 调用异步适配器
         result = sync_run_async(
@@ -68,6 +73,7 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
                     instruction=task.instruction,
                     repo_path=repo_path,
                     context={"system_prompt": agent.system_prompt or ""},
+                    task=task
                 )
             )
         )
@@ -187,11 +193,21 @@ def run_orchestrator_task(parent_task_id: int):
             return f"Failed to parse plan: {e}"
 
         # 3. 顺序执行生成的子任务
+        import time
         for child_id in child_ids:
+            # 【重要】每步开始前自检：如果父任务已被取消，立即退出循环
+            db.refresh(parent_task)
+            if parent_task.status == TaskStatus.CANCELLED:
+                print(f"[Worker] Orchestrator {parent_task_id} was cancelled. Stopping.")
+                return f"Task {parent_task_id} stopped by user."
+
             # 可以在这里根据 depends_on 做更复杂的逻辑，目前先简单顺序执行
             run_agent_task(child_id, create_reply_message=True)
+            # 稍微停顿一下（100ms），确保子任务的成功消息先到达前端并被处理，避免 WebSocket 并发冲突
+            time.sleep(0.1)
 
         # 4. 汇总结果
+        db.commit()
         db.refresh(parent_task)
         child_tasks = list(
             db.scalars(

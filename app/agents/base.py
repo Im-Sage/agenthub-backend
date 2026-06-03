@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -11,6 +13,7 @@ class AgentRunRequest(BaseModel):
     branch_name: str | None = None
     target_files: list[str] = Field(default_factory=list)
     context: dict = Field(default_factory=dict)
+    task: Any | None = None
 
 
 class AgentRunResult(BaseModel):

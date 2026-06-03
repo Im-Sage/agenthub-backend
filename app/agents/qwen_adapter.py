@@ -1,5 +1,6 @@
 import httpx
 import re
+from typing import Any
 from app.agents.base import AgentAdapter, AgentRunRequest, AgentRunResult
 from app.core.config import settings
 from app.services.workspace_service import workspace_service, WorkspaceError
@@ -55,7 +56,7 @@ class QwenAgentAdapter(AgentAdapter):
         # 解析响应，提取文件变更
         changed_files = []
         if request.repo_path:
-            changed_files = self._apply_file_changes(request.repo_path, content)
+            changed_files = await self._apply_file_changes(request.repo_path, content, request.task)
 
         return AgentRunResult(
             status="success",
@@ -64,7 +65,7 @@ class QwenAgentAdapter(AgentAdapter):
             logs=f"provider=aliyun model={settings.aliyun_model} files_changed={len(changed_files)}",
         )
 
-    def _apply_file_changes(self, repo_path: str, content: str) -> list[str]:
+    async def _apply_file_changes(self, repo_path: str, content: str, task: Any | None = None) -> list[str]:
         """解析 LLM 返回的内容并写入文件"""
         changed_files = []
         # 正则匹配 [FILE: path] 后接代码块的内容
@@ -75,7 +76,7 @@ class QwenAgentAdapter(AgentAdapter):
             file_path = match.group(1).strip()
             file_content = match.group(2)
             try:
-                workspace_service.write_file(repo_path, file_path, file_content)
+                await workspace_service.write_file(repo_path, file_path, file_content, task=task)
                 changed_files.append(file_path)
             except WorkspaceError as e:
                 print(f"[Qwen] 写入文件 {file_path} 失败: {e}")
