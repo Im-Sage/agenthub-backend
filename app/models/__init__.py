@@ -5,6 +5,7 @@ from app.models.agent import Agent
 from app.models.task import Task
 from app.models.repository import Repository
 from app.models.code_change import CodeChange
+from app.models.code_review import CodeReview
 from app.models.pull_request import PullRequest
 from app.models.deployment import Deployment
 
@@ -17,6 +18,7 @@ __all__ = [
     "Task",
     "Repository",
     "CodeChange",
+    "CodeReview",
     "PullRequest",
     "Deployment",
 ]

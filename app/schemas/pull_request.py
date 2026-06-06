@@ -19,6 +19,12 @@ class PullRequestRead(BaseModel):
     title: str
     body: str | None
     pr_url: str
+    pr_number: int | None = None
+    html_url: str | None = None
+    state: str | None = None
+    merged: bool = False
+    base_branch: str | None = None
+    head_branch: str | None = None
     status: str
     created_at: datetime
 
@@ -28,4 +34,3 @@ class PullRequestRead(BaseModel):
 class PullRequestEvent(BaseModel):
     event: str = "pull_request.created"
     data: PullRequestRead
-

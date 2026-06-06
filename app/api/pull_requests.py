@@ -1,14 +1,13 @@
 from fastapi import APIRouter, Depends, status
-from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_code_change, get_owned_task
-from app.core.websocket_manager import websocket_manager
 from app.db.session import get_db
 from app.models.pull_request import PullRequest
 from app.models.user import User
-from app.schemas.pull_request import PullRequestCreate, PullRequestEvent, PullRequestRead
+from app.schemas.pull_request import PullRequestCreate, PullRequestRead
+from app.services import event_service
 from app.services.repo_service import create_pull_request_from_code_change
 
 
@@ -24,8 +23,7 @@ async def create_pull_request(
     code_change = get_owned_code_change(db, payload.code_change_id, current_user.id)
     pull_request = await create_pull_request_from_code_change(db, code_change, payload.title, payload.body)
     task = get_owned_task(db, pull_request.task_id, current_user.id)
-    event = PullRequestEvent(data=PullRequestRead.model_validate(pull_request))
-    await websocket_manager.broadcast_json(task.conversation_id, jsonable_encoder(event))
+    await event_service.publish_pull_request_event(task.conversation_id, pull_request)
     return pull_request
 
 

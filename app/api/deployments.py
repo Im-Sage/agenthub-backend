@@ -1,15 +1,13 @@
 from fastapi import APIRouter, Depends, status
-from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_code_change, get_owned_task
-from app.core.broadcaster import broadcaster
 from app.db.session import get_db
 from app.models.deployment import Deployment
 from app.models.user import User
-from app.schemas.deployment import DeploymentCreate, DeploymentEvent, DeploymentRead
-from app.services import deployment_service
+from app.schemas.deployment import DeploymentCreate, DeploymentRead
+from app.services import deployment_service, event_service
 
 
 router = APIRouter()
@@ -24,8 +22,7 @@ async def create_deployment(
     code_change = get_owned_code_change(db, payload.code_change_id, current_user.id)
     deployment = deployment_service.create_local_deployment(db, code_change.id)
     task = get_owned_task(db, deployment.task_id, current_user.id)
-    event = DeploymentEvent(data=DeploymentRead.model_validate(deployment))
-    await broadcaster.publish(f"conv_{task.conversation_id}", jsonable_encoder(event))
+    await event_service.publish_deployment_event(task.conversation_id, deployment)
     return deployment
 
 

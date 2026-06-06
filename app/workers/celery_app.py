@@ -24,4 +24,6 @@ celery_app.conf.update(
     task_acks_late=True,
     # 单个 worker 预取任务数
     worker_prefetch_multiplier=1,
+    task_soft_time_limit=settings.task_soft_time_limit_seconds,
+    task_time_limit=settings.task_time_limit_seconds,
 )

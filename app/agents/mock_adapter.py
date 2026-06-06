@@ -13,7 +13,7 @@ class MockAgentAdapter(AgentAdapter):
                     f"- 任务指令：{request.instruction}\n\n"
                     "这是 Mock Agent 在工作区中真实写入的文件。\n"
                 )
-                workspace_service.write_file(request.repo_path, target_file, content)
+                await workspace_service.write_file(request.repo_path, target_file, content)
                 changed_files.append(target_file)
             except WorkspaceError as e:
                 return AgentRunResult(
@@ -28,4 +28,3 @@ class MockAgentAdapter(AgentAdapter):
             diff=None,
             logs="mock logs",
         )
-

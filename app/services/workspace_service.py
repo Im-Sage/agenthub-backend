@@ -1,10 +1,11 @@
 import os
+import re
 import shutil
 from pathlib import Path
 from git import Repo, GitCommandError
 from datetime import datetime
 
-from app.core.config import PROJECT_ROOT
+from app.core.config import PROJECT_ROOT, settings
 from app.models.task import Task
 
 class WorkspaceError(Exception):
@@ -24,13 +25,22 @@ class WorkspaceService:
 
     def validate_path(self, local_path: str, target_file: str) -> Path:
         """检查路径是否安全，防止跳出工作空间或访问敏感文件"""
+        target_file = target_file.strip().replace("\\", "/")
+        target_candidate = Path(target_file)
+        if target_candidate.is_absolute() or re.match(r"^[A-Za-z]:", target_file):
+            raise WorkspaceError(f"安全限制：禁止使用绝对路径 {target_file}")
+        if "\x00" in target_file:
+            raise WorkspaceError("安全限制：路径包含非法空字符")
+
         workspace_path = Path(local_path).resolve()
         target_path = (workspace_path / target_file).resolve()
 
-        if not str(target_path).startswith(str(workspace_path)):
+        try:
+            target_path.relative_to(workspace_path)
+        except ValueError:
             raise WorkspaceError(f"安全限制：尝试访问工作空间外部的路径 {target_file}")
             
-        sensitive_files = [".env", ".git"]
+        sensitive_files = [".env", ".git", ".ssh", ".aws", ".azure", ".npmrc", ".pypirc", "id_rsa", "id_ed25519"]
         for sensitive in sensitive_files:
             if sensitive in target_path.parts:
                 raise WorkspaceError(f"安全限制：禁止访问敏感文件或目录 {sensitive}")
@@ -42,9 +52,57 @@ class WorkspaceService:
         if task:
             from app.services import task_service
             await task_service.broadcast_task_log(task, f"Writing file: {target_file}")
+        if len(content.encode("utf-8")) > settings.max_agent_file_bytes:
+            raise WorkspaceError(f"安全限制：文件内容超过 {settings.max_agent_file_bytes} 字节")
         target_path = self.validate_path(local_path, target_file)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(content, encoding="utf-8")
+
+    async def delete_file(self, local_path: str, target_file: str, task: Task | None = None) -> None:
+        if task:
+            from app.services import task_service
+            await task_service.broadcast_task_log(task, f"Deleting file: {target_file}")
+        target_path = self.validate_path(local_path, target_file)
+        if target_path.exists():
+            if target_path.is_dir():
+                raise WorkspaceError(f"Refusing to delete directory via file operation: {target_file}")
+            target_path.unlink()
+
+    async def rename_file(self, local_path: str, source_file: str, target_file: str, task: Task | None = None) -> None:
+        if task:
+            from app.services import task_service
+            await task_service.broadcast_task_log(task, f"Renaming file: {source_file} -> {target_file}")
+        source_path = self.validate_path(local_path, source_file)
+        target_path = self.validate_path(local_path, target_file)
+        if not source_path.exists():
+            raise WorkspaceError(f"Cannot rename missing file: {source_file}")
+        if source_path.is_dir():
+            raise WorkspaceError(f"Refusing to rename directory via file operation: {source_file}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.replace(target_path)
+
+    async def apply_operations_from_text(self, local_path: str, content: str, task: Task | None = None) -> list[str]:
+        changed_files: list[str] = []
+
+        for match in re.finditer(r"\[RENAME:\s*(.+?)\s*->\s*(.+?)\s*\]", content):
+            source_file = match.group(1).strip()
+            target_file = match.group(2).strip()
+            await self.rename_file(local_path, source_file, target_file, task=task)
+            changed_files.extend([source_file, target_file])
+
+        for match in re.finditer(r"\[DELETE:\s*(.+?)\s*\]", content):
+            target_file = match.group(1).strip()
+            await self.delete_file(local_path, target_file, task=task)
+            changed_files.append(target_file)
+
+        file_pattern = r"\[FILE:\s*(.+?)\]\s*\n\s*```.*?\n([\s\S]*?)\n```"
+        for match in re.finditer(file_pattern, content):
+            file_path = match.group(1).strip()
+            file_content = match.group(2)
+            await self.write_file(local_path, file_path, file_content, task=task)
+            changed_files.append(file_path)
+
+        return list(dict.fromkeys(changed_files))
 
     async def clone_repository(self, user_id: int, repo_id: int, repo_url: str, task: Task | None = None) -> Path:
         """克隆仓库到指定工作空间"""

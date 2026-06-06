@@ -71,3 +71,5 @@ def test_send_orchestrator_message(client, auth_header, conversation_id):
     parent_tasks = [t for t in tasks if t["parent_task_id"] is None]
     assert len(parent_tasks) > 0
     assert parent_tasks[0]["instruction"] == "build app"
+    assert '"requires_plan_confirmation": true' in parent_tasks[0]["metadata_json"]
+    assert '"plan_status": "planning"' in parent_tasks[0]["metadata_json"]

@@ -1,12 +1,52 @@
 import asyncio
+from datetime import datetime
+from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
 from app.workers.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models import Task, Agent, Message, Repository, Conversation
 from app.schemas.enums import TaskStatus, SenderType, MessageType
 from app.agents.base import AgentRunRequest
+from app.core.config import settings
+from app.core.logging import get_logger
 from app.services import task_service
 from app.services.workspace_service import workspace_service
+
+
+logger = get_logger("worker.agent_tasks")
+
+
+def maybe_generate_revision_code_change(db, task: Task, conversation: Conversation):
+    if task.status not in [TaskStatus.SUCCESS, TaskStatus.SUCCESS.value] or task.task_type != "revision":
+        return None
+    if conversation is None or not conversation.repository_id:
+        return None
+
+    repo = db.get(Repository, conversation.repository_id)
+    if repo is None:
+        return None
+
+    from app.services import event_service, repo_service
+
+    try:
+        code_change = sync_run_async(repo_service.generate_code_change(db, task, repo))
+        sync_run_async(event_service.publish_code_change_event(task.conversation_id, code_change))
+        return code_change
+    except SoftTimeLimitExceeded as exc:
+        db.rollback()
+        error_detail = f"Task exceeded soft time limit: {settings.task_soft_time_limit_seconds}s"
+        logger.exception("task_timeout task_id=%s error=%s", task_id, error_detail)
+        task = db.get(Task, task_id)
+        if task is not None:
+            task.status = TaskStatus.FAILED
+            task.error_message = error_detail
+            task.finished_at = datetime.utcnow()
+            db.commit()
+            sync_run_async(task_service.broadcast_task_event(task, "task.updated"))
+        return f"Task {task_id} failed: {error_detail}"
+    except Exception as exc:
+        sync_run_async(task_service.broadcast_task_log(task, f"Failed to auto-generate CodeChange: {exc}"))
+        return None
 
 
 def sync_run_async(coro):
@@ -38,6 +78,8 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
             return "Task not found"
 
         task.status = TaskStatus.RUNNING
+        task.started_at = datetime.utcnow()
+        task.finished_at = None
         db.commit()
         db.refresh(task)
         # 实时推送：任务进入运行状态
@@ -80,6 +122,7 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
 
         task.status = TaskStatus.SUCCESS if result.status == "success" else TaskStatus.FAILED
         task.result_summary = result.summary
+        task.finished_at = datetime.utcnow()
         db.commit()
         db.refresh(task)
         # 实时推送：任务执行完成
@@ -98,16 +141,30 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
             db.refresh(agent_message)
             # 实时推送：Agent 回复消息
             sync_run_async(task_service.broadcast_agent_message(agent_message))
-            
+        maybe_generate_revision_code_change(db, task, conversation)
+
         return f"Task {task_id} completed: {task.status}"
+    except SoftTimeLimitExceeded as exc:
+        db.rollback()
+        error_detail = f"Task exceeded soft time limit: {settings.task_soft_time_limit_seconds}s"
+        logger.exception("orchestrator_timeout task_id=%s error=%s", parent_task_id, error_detail)
+        parent_task = db.get(Task, parent_task_id)
+        if parent_task:
+            parent_task.status = TaskStatus.FAILED
+            parent_task.error_message = error_detail
+            parent_task.finished_at = datetime.utcnow()
+            db.commit()
+            sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
+        return f"Orchestrator failed: {error_detail}"
     except Exception as exc:
         db.rollback()  # 发生异常时回滚，确保后续更新能成功
         error_detail = f"{type(exc).__name__}: {str(exc)}" if str(exc) else repr(exc)
-        print(f"[Worker] Task {task_id} raised exception: {error_detail}")
+        logger.exception("task_failed task_id=%s error=%s", task_id, error_detail)
         task = db.get(Task, task_id)
         if task is not None:
             task.status = TaskStatus.FAILED
             task.error_message = error_detail
+            task.finished_at = datetime.utcnow()
             db.commit()
             sync_run_async(task_service.broadcast_task_event(task, "task.updated"))
         return f"Task {task_id} failed: {error_detail}"
@@ -145,113 +202,54 @@ def run_orchestrator_task(parent_task_id: int):
             return "Parent task not found"
 
         parent_task.status = TaskStatus.RUNNING
+        parent_task.started_at = datetime.utcnow()
+        parent_task.finished_at = None
         db.commit()
         db.refresh(parent_task)
         sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
 
-        # 1. 运行 Orchestrator Agent 获取拆解方案 (JSON)
+        # 运行 Orchestrator Agent (现在已切换为 LangGraph 适配器)
         agent = db.get(Agent, parent_task.agent_id)
         adapter = task_service.get_adapter(agent)
         
+        # 获取工作空间上下文
+        repo_path = None
+        conversation = db.get(Conversation, parent_task.conversation_id)
+        if conversation and conversation.repository_id:
+            repo = db.get(Repository, conversation.repository_id)
+            if repo:
+                repo_path = repo.local_path
+
         run_result = sync_run_async(
             adapter.run(
                 AgentRunRequest(
                     task_id=parent_task.id,
                     conversation_id=parent_task.conversation_id,
-                    instruction=f"请拆解以下目标：{parent_task.instruction}",
+                    instruction=parent_task.instruction,
+                    repo_path=repo_path,
                     context={"system_prompt": agent.system_prompt or ""},
+                    task=parent_task
                 )
             )
         )
 
-        # 2. 解析 JSON 并创建子任务
-        try:
-            plan_json = clean_json_response(run_result.summary)
-            subtasks_data = json.loads(plan_json)
-            if not isinstance(subtasks_data, list):
-                raise ValueError("LLM 返回的不是 JSON 数组")
-            
-            child_ids = []
-            for item in subtasks_data:
-                child_task = task_service.create_subtask(
-                    db=db,
-                    parent_task=parent_task,
-                    agent_code=item.get("agent", "backend"),
-                    instruction=item.get("instruction", ""),
-                    task_type="dynamic_subtask"
-                )
-                child_ids.append(child_task.id)
-                # 推送子任务创建事件
-                sync_run_async(task_service.broadcast_task_event(child_task, "task.created"))
-            
+        parent_task = db.get(Task, parent_task_id)
+        if parent_task and parent_task.finished_at is None:
+            parent_task.finished_at = datetime.utcnow()
             db.commit()
-        except Exception as e:
+
+        return f"LangGraph Orchestrator completed: {run_result.summary}"
+    except Exception as exc:
+        db.rollback()
+        error_detail = f"{type(exc).__name__}: {str(exc)}"
+        logger.exception("orchestrator_failed task_id=%s error=%s", parent_task_id, error_detail)
+        parent_task = db.get(Task, parent_task_id)
+        if parent_task:
             parent_task.status = TaskStatus.FAILED
-            parent_task.error_message = f"解析方案失败: {e}\n原始回复: {run_result.summary}"
+            parent_task.error_message = error_detail
+            parent_task.finished_at = datetime.utcnow()
             db.commit()
             sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
-            return f"Failed to parse plan: {e}"
-
-        # 3. 顺序执行生成的子任务
-        import time
-        for child_id in child_ids:
-            # 【重要】每步开始前自检：如果父任务已被取消，立即退出循环
-            db.refresh(parent_task)
-            if parent_task.status == TaskStatus.CANCELLED:
-                print(f"[Worker] Orchestrator {parent_task_id} was cancelled. Stopping.")
-                return f"Task {parent_task_id} stopped by user."
-
-            # 可以在这里根据 depends_on 做更复杂的逻辑，目前先简单顺序执行
-            run_agent_task(child_id, create_reply_message=True)
-            # 稍微停顿一下（100ms），确保子任务的成功消息先到达前端并被处理，避免 WebSocket 并发冲突
-            time.sleep(0.1)
-
-        # 4. 汇总结果
-        db.commit()
-        db.refresh(parent_task)
-        child_tasks = list(
-            db.scalars(
-                select(Task)
-                .where(Task.parent_task_id == parent_task.id)
-                .order_by(Task.id.asc())
-            )
-        )
-        failed_tasks = [t for t in child_tasks if t.status == TaskStatus.FAILED]
-        if failed_tasks:
-            parent_task.status = TaskStatus.FAILED
-            # 汇总所有失败子任务的错误信息，处理 error_message 为 None 的情况
-            errors = []
-            for t in failed_tasks:
-                msg = t.error_message or t.result_summary or "无详细错误信息"
-                errors.append(f"子任务 {t.id} ({t.instruction[:20]}...): {msg}")
-            parent_task.error_message = "子任务执行失败：\n" + "\n".join(errors)
-        else:
-            parent_task.status = TaskStatus.SUCCESS
-            parent_task.result_summary = task_service.build_orchestrator_summary(parent_task, child_tasks)
-
-        db.commit()
-        db.refresh(parent_task)
-        sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
-
-        if parent_task.result_summary:
-            summary_message = Message(
-                conversation_id=parent_task.conversation_id,
-                sender_type=SenderType.AGENT,
-                sender_id=parent_task.agent_id,
-                content=parent_task.result_summary,
-                message_type=MessageType.TEXT,
-            )
-            db.add(summary_message)
-            db.commit()
-            db.refresh(summary_message)
-            sync_run_async(task_service.broadcast_agent_message(summary_message))
-            
-        return f"Orchestrator Task {parent_task_id} completed with {len(child_ids)} subtasks"
-    except Exception as exc:
-        if 'parent_task' in locals() and parent_task:
-            parent_task.status = TaskStatus.FAILED
-            parent_task.error_message = str(exc)
-            db.commit()
-        return f"Orchestrator Task {parent_task_id} failed: {str(exc)}"
+        return f"Orchestrator failed: {error_detail}"
     finally:
         db.close()

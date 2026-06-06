@@ -13,6 +13,7 @@ previews/
 test_repo/
 test_repo2/
 alembic/
+tests/
 
 # Frontend
 agenthub-frontend/

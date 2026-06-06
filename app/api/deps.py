@@ -12,40 +12,15 @@ from app.models.repository import Repository
 from app.models.code_change import CodeChange
 
 
+from app.services.task_service import (
+    get_owned_conversation,
+    get_owned_task,
+    get_owned_repository,
+    get_owned_code_change,
+)
+
+
 bearer_scheme = HTTPBearer()
-
-# ... (get_current_user, get_user_from_token)
-
-def get_owned_conversation(db: Session, conversation_id: int, user_id: int) -> Conversation:
-    conversation = db.get(Conversation, conversation_id)
-    if conversation is None or conversation.user_id != user_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
-    return conversation
-
-
-def get_owned_task(db: Session, task_id: int, user_id: int) -> Task:
-    task = db.get(Task, task_id)
-    if task is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
-
-    get_owned_conversation(db, task.conversation_id, user_id)
-    return task
-
-
-def get_owned_repository(db: Session, repository_id: int, user_id: int) -> Repository:
-    repository = db.get(Repository, repository_id)
-    if repository is None or repository.user_id != user_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="仓库不存在")
-    return repository
-
-
-def get_owned_code_change(db: Session, code_change_id: int, user_id: int) -> CodeChange:
-    code_change = db.get(CodeChange, code_change_id)
-    if code_change is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="代码变更不存在")
-
-    get_owned_task(db, code_change.task_id, user_id)
-    return code_change
 
 
 def get_current_user(

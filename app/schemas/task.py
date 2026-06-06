@@ -17,6 +17,9 @@ class TaskRead(BaseModel):
     result_summary: str | None = None
     error_message: str | None = None
     metadata_json: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    retry_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -28,3 +31,10 @@ class TaskEvent(BaseModel):
     event: str
     data: TaskRead
 
+
+class TaskPlanRead(BaseModel):
+    task_id: int
+    plan_status: str
+    requires_confirmation: bool
+    plan: list[dict]
+    child_ids: list[int]

@@ -12,6 +12,7 @@ from app.models.code_change import CodeChange
 from app.models.pull_request import PullRequest
 from app.models.repository import Repository
 from app.models.task import Task
+from app.services import code_change_service
 from app.services.workspace_service import workspace_service, WorkspaceError
 
 
@@ -86,9 +87,25 @@ async def generate_code_change(db: Session, task: Task, repository: Repository) 
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Git operation failed: {e}")
 
+    parent_code_change_id = None
+    revision_index = 1
+    if task.metadata_json:
+        try:
+            task_metadata = json.loads(task.metadata_json)
+        except json.JSONDecodeError:
+            task_metadata = {}
+        source_code_change_id = task_metadata.get("source_code_change_id")
+        if source_code_change_id:
+            source_code_change = db.get(CodeChange, source_code_change_id)
+            if source_code_change is not None:
+                parent_code_change_id = source_code_change.id
+                revision_index = (source_code_change.revision_index or 1) + 1
+
     code_change = CodeChange(
         task_id=task.id,
         repository_id=repository.id,
+        parent_code_change_id=parent_code_change_id,
+        revision_index=revision_index,
         repo_url=repository.repo_url,
         branch_name=branch_name,
         commit_hash=commit_hash,
@@ -110,6 +127,8 @@ async def create_pull_request_from_code_change(
     title: str,
     body: str | None,
 ) -> PullRequest:
+    code_change_service.require_accepted(code_change, "creating a pull request")
+
     repository = db.get(Repository, code_change.repository_id)
     if repository is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="仓库不存在")
@@ -146,8 +165,7 @@ async def create_pull_request_from_code_change(
     except GitHubError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    code_change.commit_hash = commit_hash
-    code_change.status = "committed"
+    code_change_service.mark_committed(code_change, commit_hash)
     db.commit()
     db.refresh(code_change)
 
@@ -160,6 +178,12 @@ async def create_pull_request_from_code_change(
         title=title,
         body=body,
         pr_url=pr_info["html_url"],
+        pr_number=pr_info.get("pr_number"),
+        html_url=pr_info.get("html_url"),
+        state=pr_info.get("state"),
+        merged=bool(pr_info.get("merged", False)),
+        base_branch=repository.default_branch,
+        head_branch=code_change.branch_name,
         status="created",
     )
     db.add(pull_request)
@@ -172,4 +196,3 @@ async def create_pull_request_from_code_change(
 def reset_workspace_for_test(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
-

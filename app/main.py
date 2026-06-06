@@ -19,11 +19,14 @@ from app.api import (
 from app.core.config import PROJECT_ROOT, settings
 from app.db import base  # noqa: F401
 from app.core.broadcaster import broadcaster
+from app.core.errors import install_error_handlers
+from app.core.logging import RequestLoggingMiddleware, configure_logging
 from app.core.websocket_manager import websocket_manager
 
 
 PREVIEW_ROOT = PROJECT_ROOT / "previews"
 PREVIEW_ROOT.mkdir(exist_ok=True)
+configure_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,10 +37,13 @@ async def lifespan(app: FastAPI):
     await broadcaster.stop()
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+install_error_handlers(app)
+app.add_middleware(RequestLoggingMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=settings.cors_allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,5 +68,5 @@ def health_check() -> dict[str, str]:
 
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
 

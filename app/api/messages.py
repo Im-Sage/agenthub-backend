@@ -1,21 +1,26 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_conversation
-from app.core.websocket_manager import websocket_manager
+from app.core.config import settings
+from app.core.rate_limit import rate_limiter
 from app.db.session import get_db
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.user import User
 from app.schemas.enums import SenderType
-from app.schemas.message import MessageCreate, MessageRead, WebSocketMessageEvent
+from app.schemas.message import MessageCreate, MessageRead
+from app.services import event_service
 from app.services.task_service import (
     broadcast_task_event,
     create_mock_task_from_message,
     create_orchestrator_tasks_from_message,
     create_qwen_task_from_message,
+    ensure_user_task_capacity,
+    parse_mock_instruction,
+    parse_orchestrator_goal,
+    parse_qwen_instruction,
 )
 from app.workers import agent_tasks
 
@@ -49,6 +54,18 @@ async def create_message(
     db: Session = Depends(get_db),
 ) -> Message:
     conversation = get_owned_conversation(db, payload.conversation_id, current_user.id)
+    rate_limiter.hit(
+        f"message:{current_user.id}",
+        limit=settings.message_rate_limit_count,
+        window_seconds=settings.message_rate_limit_window_seconds,
+    )
+    if (
+        parse_orchestrator_goal(payload.content) is not None
+        or parse_qwen_instruction(payload.content) is not None
+        or parse_mock_instruction(payload.content) is not None
+    ):
+        ensure_user_task_capacity(db, current_user.id)
+
     message = Message(
         conversation_id=conversation.id,
         sender_type=SenderType.USER,
@@ -60,8 +77,7 @@ async def create_message(
     db.commit()
     db.refresh(message)
 
-    event = WebSocketMessageEvent(data=MessageRead.model_validate(message))
-    await websocket_manager.broadcast_json(conversation.id, jsonable_encoder(event))
+    await event_service.publish_message_event(message)
 
     orchestrator_task = create_orchestrator_tasks_from_message(db, conversation, payload.content)
     if orchestrator_task is not None:

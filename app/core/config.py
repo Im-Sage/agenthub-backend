@@ -13,6 +13,19 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24
     database_url: str = "sqlite:///./agenthub.db"
     redis_url: str = "redis://localhost:6379/0"
+    log_level: str = "INFO"
+    cors_allow_origin_regex: str = (
+        r"^http://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|"
+        r"192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+):5173$"
+    )
+    login_rate_limit_count: int = 5
+    login_rate_limit_window_seconds: int = 300
+    message_rate_limit_count: int = 20
+    message_rate_limit_window_seconds: int = 60
+    max_concurrent_tasks_per_user: int = 20
+    task_soft_time_limit_seconds: int = 300
+    task_time_limit_seconds: int = 360
+    max_agent_file_bytes: int = 500_000
 
     aliyun_api_key: str | None = None
     aliyun_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
