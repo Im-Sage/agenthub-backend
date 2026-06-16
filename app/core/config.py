@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     aliyun_timeout_seconds: float = 120.0
 
     github_token: str | None = None
+    
+    # MCP Settings
+    mcp_enabled: bool = False
+    mcp_tool_mode: str = "local"  # local | mcp | hybrid
+    mcp_workspace_server_url: str | None = None
+    mcp_internal_token: str | None = None
 
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8")
 

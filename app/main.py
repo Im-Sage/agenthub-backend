@@ -18,6 +18,10 @@ from app.api import (
 )
 from app.core.config import PROJECT_ROOT, settings
 from app.db import base  # noqa: F401
+from app.tools import register_builtin_tools
+
+# 注册内置工具
+register_builtin_tools()
 from app.core.broadcaster import broadcaster
 from app.core.errors import install_error_handlers
 from app.core.logging import RequestLoggingMiddleware, configure_logging

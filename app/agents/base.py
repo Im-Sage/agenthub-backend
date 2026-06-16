@@ -5,6 +5,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+# AgentRunRequest 定义了一个数据模型，
+# 包含了运行 Agent 所需的各种信息，
+# 如任务 ID、会话 ID、指令、代码仓库路径、分支名称、目标文件列表、上下文信息等。
 class AgentRunRequest(BaseModel):
     task_id: int
     conversation_id: int
@@ -23,7 +26,11 @@ class AgentRunResult(BaseModel):
     diff: str | None = None
     logs: str | None = None
 
-
+# ABC（Abstract Base Class）是 Python 标准库中的一个模块，用于定义抽象基类。
+# 抽象基类是一种不能被实例化的类，通常用于定义接口或规范，要求子类必须实现特定的方法。
+# 在这个代码中，AgentAdapter 被定义为一个抽象基类，要求所有继承自它的类必须实现 run 方法。
+# 这种设计有助于确保所有 AgentAdapter 的子类都遵循相同的接口规范，使得代码更加一致和可维护。
+# 这里ABC的作用是把它定义成一个抽象基类，要求所有继承自 AgentAdapter 的类必须实现 run 方法。
 class AgentAdapter(ABC):
     @abstractmethod
     async def run(self, request: AgentRunRequest) -> AgentRunResult:

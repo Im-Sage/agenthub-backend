@@ -11,7 +11,10 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.services import task_service
 from app.services.workspace_service import workspace_service
+from app.tools import register_builtin_tools
 
+# 注册内置工具
+register_builtin_tools()
 
 logger = get_logger("worker.agent_tasks")
 

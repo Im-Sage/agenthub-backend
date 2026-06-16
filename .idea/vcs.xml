@@ -4,5 +4,16 @@
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/test_repo" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/test_repo2" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/repo-10" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/repo-9" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-1/repo-1" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-16/repo-18" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-17/repo-11" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-17/repo-12" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-18/repo-13" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-19/repo-14" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-19/repo-15" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-19/repo-16" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/workspaces/user-20/repo-17" vcs="Git" />
   </component>
 </project>

@@ -8,6 +8,7 @@ from app.models.code_change import CodeChange
 from app.models.code_review import CodeReview
 from app.models.pull_request import PullRequest
 from app.models.deployment import Deployment
+from app.models.tool_call import ToolCall
 
 __all__ = [
     "Base",
@@ -21,4 +22,5 @@ __all__ = [
     "CodeReview",
     "PullRequest",
     "Deployment",
+    "ToolCall",
 ]

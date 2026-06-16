@@ -15,6 +15,16 @@ class WorkspaceService:
     def __init__(self, workspaces_dir: Path | str = None):
         self.workspaces_dir = Path(workspaces_dir) if workspaces_dir else PROJECT_ROOT / "workspaces"
         self.workspaces_dir.mkdir(parents=True, exist_ok=True)
+        self.ignored_dirs = {
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".pytest_cache",
+            ".venv",
+            "venv",
+            "dist",
+            "build",
+        }
 
     def get_repo_path(self, user_id: int, repo_id: int) -> Path:
         return self.workspaces_dir / f"user-{user_id}" / f"repo-{repo_id}"
@@ -57,6 +67,80 @@ class WorkspaceService:
         target_path = self.validate_path(local_path, target_file)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(content, encoding="utf-8")
+
+    def read_file(self, local_path: str, target_file: str) -> str:
+        target_path = self.validate_path(local_path, target_file)
+        if not target_path.exists():
+            raise WorkspaceError(f"File not found: {target_file}")
+        if target_path.is_dir():
+            raise WorkspaceError(f"Refusing to read directory as file: {target_file}")
+        if target_path.stat().st_size > settings.max_agent_file_bytes:
+            raise WorkspaceError(f"安全限制：文件内容超过 {settings.max_agent_file_bytes} 字节")
+        return target_path.read_text(encoding="utf-8")
+
+    def list_files(self, local_path: str, target_dir: str = ".", max_files: int = 200) -> list[str]:
+        try:
+            max_files = max(1, int(max_files))
+        except (TypeError, ValueError):
+            raise WorkspaceError("max_files must be an integer")
+        root_path = self.validate_path(local_path, target_dir)
+        workspace_path = Path(local_path).resolve()
+        if not root_path.exists():
+            raise WorkspaceError(f"Directory not found: {target_dir}")
+        if not root_path.is_dir():
+            raise WorkspaceError(f"Path is not a directory: {target_dir}")
+
+        files: list[str] = []
+        for path in root_path.rglob("*"):
+            if any(part in self.ignored_dirs for part in path.relative_to(workspace_path).parts):
+                continue
+            if path.is_file():
+                files.append(path.relative_to(workspace_path).as_posix())
+                if len(files) >= max_files:
+                    break
+        return files
+
+    def search_code(self, local_path: str, query: str, target_dir: str = ".", max_results: int = 50) -> list[dict[str, str | int]]:
+        if not query:
+            raise WorkspaceError("query is required")
+
+        try:
+            max_results = max(1, int(max_results))
+        except (TypeError, ValueError):
+            raise WorkspaceError("max_results must be an integer")
+        root_path = self.validate_path(local_path, target_dir)
+        workspace_path = Path(local_path).resolve()
+        if not root_path.exists():
+            raise WorkspaceError(f"Directory not found: {target_dir}")
+        if not root_path.is_dir():
+            raise WorkspaceError(f"Path is not a directory: {target_dir}")
+
+        results: list[dict[str, str | int]] = []
+        for path in root_path.rglob("*"):
+            relative_parts = path.relative_to(workspace_path).parts
+            if any(part in self.ignored_dirs for part in relative_parts):
+                continue
+            if not path.is_file() or path.stat().st_size > settings.max_agent_file_bytes:
+                continue
+
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
+
+            for line_number, line in enumerate(lines, start=1):
+                if query in line:
+                    results.append(
+                        {
+                            "file": path.relative_to(workspace_path).as_posix(),
+                            "line": line_number,
+                            "text": line.strip(),
+                        }
+                    )
+                    if len(results) >= max_results:
+                        return results
+
+        return results
 
     async def delete_file(self, local_path: str, target_file: str, task: Task | None = None) -> None:
         if task:

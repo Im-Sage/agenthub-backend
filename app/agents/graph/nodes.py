@@ -217,7 +217,13 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
 
         changed_files: list[str] = []
         if repo_path:
-            changed_files = await workspace_service.apply_operations_from_text(repo_path, content, task=child_task)
+            from app.tools.agent_file_ops import apply_file_operations_with_tools
+            changed_files = await apply_file_operations_with_tools(
+                local_path=repo_path,
+                content=content,
+                task_id=child_task.id if child_task else None,
+                conversation_id=state.get("conversation_id"),
+            )
 
         if child_task:
             child_task.status = TaskStatus.SUCCESS

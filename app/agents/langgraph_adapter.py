@@ -25,6 +25,7 @@ class LangGraphOrchestratorAdapter(AgentAdapter):
 
         # 2. 执行图
         # 为了能让前端实时看到进度，我们可能需要使用 stream 模式，但先实现 invoke 跑通流程
+        # 这里的 final_state 包含了整个执行过程中的状态变更，最终会有执行结果、错误信息、是否等待确认等状态标记
         final_state = await agent_graph.ainvoke(initial_state)
 
         # 3. 返回结果
