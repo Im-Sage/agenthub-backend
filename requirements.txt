@@ -15,3 +15,6 @@ PyJWT==2.10.1
 pymysql==1.1.1
 httpx==0.28.1
 mcp[cli]
+langgraph
+langchain-openai
+langgraph-checkpoint-sqlite
