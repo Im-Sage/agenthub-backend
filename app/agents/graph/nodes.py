@@ -5,6 +5,7 @@ from typing import Any, Dict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from langgraph.types import interrupt
 
 from app.agents.graph.state import AgentState
 from app.core.config import settings
@@ -61,32 +62,6 @@ def _child_ids_from_state(state: AgentState) -> list[int]:
 async def plan_node(state: AgentState) -> Dict[str, Any]:
     from app.services import task_service
 
-    db = SessionLocal()
-    try:
-        parent_task = db.get(Task, state["task_id"])
-        parent_metadata = {}
-        if parent_task and parent_task.metadata_json:
-            try:
-                parent_metadata = json.loads(parent_task.metadata_json)
-            except json.JSONDecodeError:
-                parent_metadata = {}
-
-        if parent_metadata.get("plan_status") == "confirmed" and parent_metadata.get("plan"):
-            plan = parent_metadata["plan"]
-            child_ids = parent_metadata.get("child_ids", [])
-            return {
-                "plan": plan,
-                "current_step_index": 0,
-                "current_agent": plan[0]["agent"] if plan else None,
-                "current_instruction": plan[0]["instruction"] if plan else None,
-                "metadata_json": json.dumps({"child_ids": child_ids}),
-                "awaiting_confirmation": False,
-                "errors": [],
-                "is_finished": not bool(plan),
-            }
-    finally:
-        db.close()
-
     llm = get_llm()
     messages = [
         SystemMessage(
@@ -126,7 +101,7 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
             parent_task.status = TaskStatus.PENDING
             parent_task.result_summary = f"Orchestrator plan generated with {len(plan)} step(s). Awaiting confirmation."
             parent_task.metadata_json = json.dumps(plan_metadata, ensure_ascii=False)
-            parent_task.finished_at = datetime.utcnow()
+            parent_task.finished_at = None
             db.commit()
             await task_service.broadcast_task_event(parent_task, "task.updated")
     finally:
@@ -135,16 +110,36 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
     return {
         "plan": plan,
         "current_step_index": 0,
-        "current_agent": None,
-        "current_instruction": None,
+        "current_agent": plan[0]["agent"] if plan else None,
+        "current_instruction": plan[0]["instruction"] if plan else None,
         "metadata_json": json.dumps({"child_ids": child_ids}),
         "awaiting_confirmation": True,
+        "approval_status": None,
         "errors": [],
-        "is_finished": True,
-        "final_summary": f"Orchestrator plan generated with {len(plan)} step(s). Awaiting confirmation.",
+        "is_finished": not bool(plan),
+        "final_summary": None,
     }
 
+async def approval_node(state: AgentState) -> Dict[str, Any]:
+    decision = interrupt(
+        {
+            "type": "orchestrator_plan_approval",
+            "task_id": state["task_id"],
+            "plan": state["plan"],
+        }
+    )
 
+    approved = (
+        bool(decision.get("approved"))
+        if isinstance(decision, dict)
+        else bool(decision)
+    )
+
+    return {
+        "approval_status": "approved" if approved else "rejected",
+        "awaiting_confirmation": False,
+        "is_finished": not approved,
+    }
 async def execute_node(state: AgentState) -> Dict[str, Any]:
     from app.services import task_service
 
