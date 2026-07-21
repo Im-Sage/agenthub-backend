@@ -3,6 +3,9 @@ from app.tools.base import ToolCallRequest
 from app.tools.registry import tool_registry
 
 
+# apply_file_operations_with_tools 函数用于解析给定的内容，
+# 并根据其中的指令执行文件操作（重命名、删除、写入）。
+# 它会调用注册的工具来完成这些操作，并返回所有被修改的文件列表。
 async def apply_file_operations_with_tools(
     local_path: str,
     content: str,

@@ -7,6 +7,7 @@ from app.db.session import SessionLocal
 from app.models import Task, Agent, Message, Repository, Conversation
 from app.schemas.enums import TaskStatus, SenderType, MessageType
 from app.agents.base import AgentRunRequest
+from app.agents.langgraph_adapter import LangGraphOrchestratorAdapter
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.services import task_service
@@ -40,6 +41,7 @@ def maybe_generate_revision_code_change(db, task: Task, conversation: Conversati
         error_detail = f"Task exceeded soft time limit: {settings.task_soft_time_limit_seconds}s"
         logger.exception("task_timeout task_id=%s error=%s", task_id, error_detail)
         task = db.get(Task, task_id)
+        # 如果任务存在，更新其状态为 FAILED 并记录错误信息
         if task is not None:
             task.status = TaskStatus.FAILED
             task.error_message = error_detail
@@ -71,6 +73,14 @@ def sync_run_async(coro):
 负责单个 Agent 的异步执行，
 包括状态更新
 （PENDING -> RUNNING -> SUCCESS/FAILED）和结果存储。
+收到任务后，Celery worker 会调用这个函数来执行任务。
+具体的执行流程：
+1. 获取任务和关联的 Agent。
+2. 更新任务状态为 RUNNING。
+3. 获取工作空间上下文（如果有仓库关联）。
+4. 调用 Agent 的适配器执行任务。
+5. 根据执行结果更新任务状态为 SUCCESS 或 FAILED，并存储结果摘要。
+6. 如果需要，创建 Agent 回复消息。
 """
 @celery_app.task(name="app.workers.agent_tasks.run_agent_task")
 def run_agent_task(task_id: int, create_reply_message: bool = True):
@@ -150,15 +160,17 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
     except SoftTimeLimitExceeded as exc:
         db.rollback()
         error_detail = f"Task exceeded soft time limit: {settings.task_soft_time_limit_seconds}s"
-        logger.exception("orchestrator_timeout task_id=%s error=%s", parent_task_id, error_detail)
-        parent_task = db.get(Task, parent_task_id)
-        if parent_task:
-            parent_task.status = TaskStatus.FAILED
-            parent_task.error_message = error_detail
-            parent_task.finished_at = datetime.utcnow()
+        logger.exception("task_timeout task_id=%s error=%s", task_id, error_detail)
+        task = db.get(Task, task_id)
+
+
+        if task:
+            task.status = TaskStatus.FAILED
+            task.error_message = error_detail
+            task.finished_at = datetime.utcnow()
             db.commit()
-            sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
-        return f"Orchestrator failed: {error_detail}"
+            sync_run_async(task_service.broadcast_task_event(task, "task.updated"))
+        return f"Task {task_id} failed: {error_detail}"
     except Exception as exc:
         db.rollback()  # 发生异常时回滚，确保后续更新能成功
         error_detail = f"{type(exc).__name__}: {str(exc)}" if str(exc) else repr(exc)
@@ -196,7 +208,11 @@ def clean_json_response(content: str) -> str:
     # 3. 兜底：直接返回原始字符串
     return content.strip()
 
-@celery_app.task(name="app.workers.agent_tasks.run_orchestrator_task")
+"""
+run_orchestrator_task 负责运行 Orchestrator Agent（现在已切换为 LangGraph 适配器），
+并处理任务状态更新、异常处理和结果广播。
+"""
+@celery_app.task(name="app.workers.agent_tasks.run_orchestrator_task")  # 将这个函数注册为 Celery 任务
 def run_orchestrator_task(parent_task_id: int):
     db = SessionLocal()
     try:
@@ -209,10 +225,12 @@ def run_orchestrator_task(parent_task_id: int):
         parent_task.finished_at = None
         db.commit()
         db.refresh(parent_task)
+        #
         sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
 
         # 运行 Orchestrator Agent (现在已切换为 LangGraph 适配器)
         agent = db.get(Agent, parent_task.agent_id)
+        # adapter 是一个异步适配器对象，负责与具体的 Agent 交互
         adapter = task_service.get_adapter(agent)
         
         # 获取工作空间上下文
@@ -223,8 +241,9 @@ def run_orchestrator_task(parent_task_id: int):
             if repo:
                 repo_path = repo.local_path
 
+        # 运行异步适配器并等待结果
         run_result = sync_run_async(
-            adapter.run(
+            adapter.run(    # 调用适配器的 run 方法，传入 AgentRunRequest，不同的适配器会有不同的实现，这里是celery worker调用异步适配器的入口，会调用LangGraphAdapter.run方法
                 AgentRunRequest(
                     task_id=parent_task.id,
                     conversation_id=parent_task.conversation_id,
@@ -236,10 +255,26 @@ def run_orchestrator_task(parent_task_id: int):
             )
         )
 
-        parent_task = db.get(Task, parent_task_id)
-        if parent_task and parent_task.finished_at is None:
-            parent_task.finished_at = datetime.utcnow()
-            db.commit()
+        if run_result.status == "awaiting_confirmation":
+            parent_task = db.get(Task, parent_task_id)
+            if parent_task:
+                # 首次运行 Orchestrator 任务时，如果需要人工确认，则将任务状态设置为 PENDING，等待前端确认后再继续执行
+                parent_task.status = TaskStatus.PENDING
+                # finished_at=None的原因是因为任务还没有真正完成，它正在等待人工确认。设置为 None 表示任务仍然处于进行中状态，尚未结束。
+                parent_task.finished_at = None
+                db.commit()
+                db.refresh(parent_task)
+                sync_run_async(
+                    # 广播新的 task.updated，避免前端一直显示 RUNNING。
+                    task_service.broadcast_task_event(
+                        parent_task,
+                        "task.updated",
+                    )
+                )
+            return (
+                "LangGraph Orchestrator awaiting confirmation: "
+                f"{run_result.summary}"
+            )
 
         return f"LangGraph Orchestrator completed: {run_result.summary}"
     except Exception as exc:
@@ -254,5 +289,57 @@ def run_orchestrator_task(parent_task_id: int):
             db.commit()
             sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
         return f"Orchestrator failed: {error_detail}"
+    finally:
+        db.close()
+
+
+"""
+resume_orchestrator_task 负责在 Orchestrator Agent 处于等待确认状态时，接收前端的确认结果并继续执行任务。
+1. 接收 parent_task_id 和 resume_value（前端确认的结果）。
+2. 将任务状态从 PENDING 改为 RUNNING。
+3. 调用适配器的 resume 方法继续执行任务。
+4. 根据执行结果更新任务状态为 SUCCESS 或 FAILED，并存储结果摘要。
+"""
+@celery_app.task(name="app.workers.agent_tasks.resume_orchestrator_task")
+def resume_orchestrator_task(parent_task_id: int, resume_value: dict):
+    db = SessionLocal()
+    try:
+        parent_task = db.get(Task, parent_task_id)
+        if parent_task is None:
+            return "Parent task not found"
+
+        parent_task.status = TaskStatus.RUNNING
+        parent_task.finished_at = None
+        db.commit()
+        db.refresh(parent_task)
+        sync_run_async(
+            task_service.broadcast_task_event(parent_task, "task.updated")
+        )
+
+        adapter = LangGraphOrchestratorAdapter()
+        run_result = sync_run_async(
+            # resume 方法会继续执行之前被中断的任务，传入前端确认的结果 resume_value
+            adapter.resume(parent_task_id, resume_value) # 这里只是创建了一个协程对象，并没有真正执行，真正执行是在 sync_run_async 中调用 await
+        )
+
+        return f"LangGraph Orchestrator resumed: {run_result.summary}"
+    except Exception as exc:
+        db.rollback()
+        error_detail = f"{type(exc).__name__}: {str(exc)}"
+        logger.exception(
+            "orchestrator_resume_failed task_id=%s error=%s",
+            parent_task_id,
+            error_detail,
+        )
+        parent_task = db.get(Task, parent_task_id)
+        if parent_task:
+            parent_task.status = TaskStatus.FAILED
+            parent_task.error_message = error_detail
+            parent_task.finished_at = datetime.utcnow()
+            db.commit()
+            sync_run_async(
+                task_service.broadcast_task_event(parent_task, "task.updated")
+            )
+        return f"Orchestrator resume failed: {error_detail}"
     finally:
         db.close()

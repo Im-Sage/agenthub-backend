@@ -1,27 +1,39 @@
 from langgraph.graph import StateGraph, START, END
 
-from app.agents.graph.nodes import plan_node, execute_node, verify_node, summarize_node
+from app.agents.graph.nodes import (
+    approval_node,
+    execute_node,
+    plan_node,
+    summarize_node,
+    verify_node,
+)
 from app.agents.graph.state import AgentState
 
 
-def create_agent_graph():
+def create_agent_graph(checkpointer=None):
+    # 创建一个状态图，定义节点和边
     workflow = StateGraph(AgentState)
 
+    # add_node的参数是节点的名称和节点对象，add_edge的参数是起始节点和目标节点
     workflow.add_node("planner", plan_node)
+    workflow.add_node("approval", approval_node)
     workflow.add_node("executor", execute_node)
     workflow.add_node("verifier", verify_node)
     workflow.add_node("summarizer", summarize_node)
 
+    # 添加边，定义节点之间的流转关系
+    # START是图的起始节点，END是图的结束节点
     workflow.add_edge(START, "planner")
+    workflow.add_edge("planner", "approval")
 
-    def planner_router(state: AgentState):
-        if state.get("awaiting_confirmation"):
-            return END
-        return "executor"
+    def approval_router(state: AgentState):
+        if state.get("approval_status") == "approved":
+            return "executor"
+        return END
 
     workflow.add_conditional_edges(
-        "planner",
-        planner_router,
+        "approval",
+        approval_router,
         {
             "executor": "executor",
             END: END,
@@ -46,7 +58,4 @@ def create_agent_graph():
     )
 
     workflow.add_edge("summarizer", END)
-    return workflow.compile()
-
-
-agent_graph = create_agent_graph()
+    return workflow.compile(checkpointer=checkpointer)

@@ -65,9 +65,12 @@ async def confirm_task_plan(
     task = get_owned_task(db, task_id, current_user.id)
     task_service.ensure_user_task_capacity(db, current_user.id)
     task = task_service.confirm_orchestrator_plan(db, task)
-    await task_service.broadcast_task_event(task, "task.updated")
 
-    result = agent_tasks.run_orchestrator_task.delay(task.id)
+    # 恢复已中断的 Orchestrator，并保存新的 Celery 任务 ID 以便后续取消
+    result = agent_tasks.resume_orchestrator_task.delay(
+        task.id,
+        {"approved": True},
+    )
     task.celery_task_id = result.id
     db.commit()
     db.refresh(task)
@@ -125,14 +128,27 @@ async def cancel_task(
     return task
 
 
+"""
+retry_task 为重试任务的接口，主要逻辑如下：
+1. 验证用户是否有权限访问指定的任务。
+2. 检查用户的任务容量是否足够，确保用户可以创建新的任务。
+3. 创建一个新的重试任务，并将其与原任务关联。
+4. 广播任务创建事件，通知前端或其他服务有新任务。
+5. 根据任务的适配器类型，将任务提交到 Celery 队列执行，并保存 Celery 任务 ID 以便后续取消。
+6. 提交数据库事务并刷新重试任务对象。
+7. 广播任务更新事件，通知前端或其他服务任务状态已更新。
+8. 返回创建的重试任务对象。
+"""
 @router.post("/{task_id}/retry", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
 async def retry_task(
     task_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Task:
+    # 1. 验证用户是否有权限访问指定的任务,task_id 是要重试的任务的 ID，current_user 是当前登录的用户，db 是数据库会话
     task = get_owned_task(db, task_id, current_user.id)
     task_service.ensure_user_task_capacity(db, current_user.id)
+    # 2. 创建一个新的重试任务，并将其与原任务关联
     retry_task = task_service.create_retry_task(db, task)
     await task_service.broadcast_task_event(retry_task, "task.created")
 
