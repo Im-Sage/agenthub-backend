@@ -189,4 +189,8 @@ def test_adapter_start_uses_persistent_graph_and_task_config(monkeypatch):
     assert graph_input["approval_status"] is None
     assert config == graph_config(123)
     assert result.status == "awaiting_confirmation"
-    assert result.summary == "任务处理完成"
+    assert result.summary == (
+        "Orchestrator plan generated and is awaiting confirmation."
+    )
+    assert result.changed_files == []
+    assert result.logs == "LangGraph interrupted for human approval."
