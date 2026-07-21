@@ -7,6 +7,7 @@ from app.db.session import SessionLocal
 from app.models import Task, Agent, Message, Repository, Conversation
 from app.schemas.enums import TaskStatus, SenderType, MessageType
 from app.agents.base import AgentRunRequest
+from app.agents.langgraph_adapter import LangGraphOrchestratorAdapter
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.services import task_service
@@ -236,10 +237,23 @@ def run_orchestrator_task(parent_task_id: int):
             )
         )
 
-        parent_task = db.get(Task, parent_task_id)
-        if parent_task and parent_task.finished_at is None:
-            parent_task.finished_at = datetime.utcnow()
-            db.commit()
+        if run_result.status == "awaiting_confirmation":
+            parent_task = db.get(Task, parent_task_id)
+            if parent_task:
+                parent_task.status = TaskStatus.PENDING
+                parent_task.finished_at = None
+                db.commit()
+                db.refresh(parent_task)
+                sync_run_async(
+                    task_service.broadcast_task_event(
+                        parent_task,
+                        "task.updated",
+                    )
+                )
+            return (
+                "LangGraph Orchestrator awaiting confirmation: "
+                f"{run_result.summary}"
+            )
 
         return f"LangGraph Orchestrator completed: {run_result.summary}"
     except Exception as exc:
@@ -254,5 +268,49 @@ def run_orchestrator_task(parent_task_id: int):
             db.commit()
             sync_run_async(task_service.broadcast_task_event(parent_task, "task.updated"))
         return f"Orchestrator failed: {error_detail}"
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.agent_tasks.resume_orchestrator_task")
+def resume_orchestrator_task(parent_task_id: int, resume_value: dict):
+    db = SessionLocal()
+    try:
+        parent_task = db.get(Task, parent_task_id)
+        if parent_task is None:
+            return "Parent task not found"
+
+        parent_task.status = TaskStatus.RUNNING
+        parent_task.finished_at = None
+        db.commit()
+        db.refresh(parent_task)
+        sync_run_async(
+            task_service.broadcast_task_event(parent_task, "task.updated")
+        )
+
+        adapter = LangGraphOrchestratorAdapter()
+        run_result = sync_run_async(
+            adapter.resume(parent_task_id, resume_value)
+        )
+
+        return f"LangGraph Orchestrator resumed: {run_result.summary}"
+    except Exception as exc:
+        db.rollback()
+        error_detail = f"{type(exc).__name__}: {str(exc)}"
+        logger.exception(
+            "orchestrator_resume_failed task_id=%s error=%s",
+            parent_task_id,
+            error_detail,
+        )
+        parent_task = db.get(Task, parent_task_id)
+        if parent_task:
+            parent_task.status = TaskStatus.FAILED
+            parent_task.error_message = error_detail
+            parent_task.finished_at = datetime.utcnow()
+            db.commit()
+            sync_run_async(
+                task_service.broadcast_task_event(parent_task, "task.updated")
+            )
+        return f"Orchestrator resume failed: {error_detail}"
     finally:
         db.close()
