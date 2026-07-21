@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     task_soft_time_limit_seconds: int = 300
     task_time_limit_seconds: int = 360
     max_agent_file_bytes: int = 500_000
+    # LangGraph 相关配置，用于存储 LangGraph 的检查点数据，确保在不同环境下启动时能够正确访问数据库。
+    langgraph_checkpoint_path: str = "./langgraph_checkpoints.sqlite3"
 
     aliyun_api_key: str | None = None
     aliyun_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -51,6 +53,13 @@ class Settings(BaseSettings):
         relative_path = self.database_url.replace("sqlite:///./", "", 1)
         database_path = PROJECT_ROOT / relative_path
         return f"sqlite:///{database_path.as_posix()}"
+
+    @property
+    def resolved_langgraph_checkpoint_path(self) -> str:
+        path = Path(self.langgraph_checkpoint_path)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve().as_posix()
 
 
 settings = Settings()
