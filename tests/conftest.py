@@ -59,11 +59,13 @@ def client(db_session):
     original_publish = broadcaster.publish
     original_run_agent_delay = agent_tasks.run_agent_task.delay
     original_run_orchestrator_delay = agent_tasks.run_orchestrator_task.delay
+    original_resume_orchestrator_delay = agent_tasks.resume_orchestrator_task.delay
     broadcaster.subscribe = noop_subscribe
     broadcaster.stop = noop_stop
     broadcaster.publish = noop_publish
     agent_tasks.run_agent_task.delay = lambda *args, **kwargs: DummyAsyncResult()
     agent_tasks.run_orchestrator_task.delay = lambda *args, **kwargs: DummyAsyncResult()
+    agent_tasks.resume_orchestrator_task.delay = lambda *args, **kwargs: DummyAsyncResult()
 
     def override_get_db():
         try:
@@ -83,3 +85,4 @@ def client(db_session):
         broadcaster.publish = original_publish
         agent_tasks.run_agent_task.delay = original_run_agent_delay
         agent_tasks.run_orchestrator_task.delay = original_run_orchestrator_delay
+        agent_tasks.resume_orchestrator_task.delay = original_resume_orchestrator_delay

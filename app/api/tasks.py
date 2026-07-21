@@ -65,9 +65,12 @@ async def confirm_task_plan(
     task = get_owned_task(db, task_id, current_user.id)
     task_service.ensure_user_task_capacity(db, current_user.id)
     task = task_service.confirm_orchestrator_plan(db, task)
-    await task_service.broadcast_task_event(task, "task.updated")
 
-    result = agent_tasks.run_orchestrator_task.delay(task.id)
+    # 恢复已中断的 Orchestrator，并保存新的 Celery 任务 ID 以便后续取消
+    result = agent_tasks.resume_orchestrator_task.delay(
+        task.id,
+        {"approved": True},
+    )
     task.celery_task_id = result.id
     db.commit()
     db.refresh(task)
