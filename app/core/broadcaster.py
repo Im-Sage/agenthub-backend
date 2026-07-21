@@ -33,11 +33,12 @@ class Broadcaster:
         logger.info("publish channel=%s event=%s", channel, message.get("event", "message"))
         client = self.get_redis()
         try:
+            # Redis 的 publish 方法要求消息是字符串，因此我们将消息对象序列化为 JSON 字符串
             await client.publish(channel, json.dumps(message))
         except Exception as exc:
             logger.exception("publish_failed channel=%s error=%s", channel, exc)
 
-    async def subscribe(self, channel_pattern: str, callback):
+    async def subscribe(self, channel_pattern: str, callback):  # callback 是一个异步函数，接收两个参数：conversation_id 和消息数据
         client = self.get_redis()
         self.pubsub = client.pubsub()
 

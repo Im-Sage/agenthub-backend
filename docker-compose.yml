@@ -11,7 +11,7 @@ services:
       - "8001:8001"   # RedisInsight 可视化界面 (浏览器访问 http://localhost:8001)
     volumes:
       - redis_data:/data
-    restart: always
+    restart: no
 
   # RabbitMQ - 可作为 Celery 的另一种消息中间件选择
   rabbitmq:

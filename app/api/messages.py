@@ -47,6 +47,17 @@ def list_messages(
     return list(db.scalars(statement))
 
 
+"""
+create_message 为用户发送消息的接口，主要逻辑如下：
+1. 验证用户是否有权限访问指定的会话。
+2. 检查用户的消息发送频率是否超过限制。
+3. 如果消息内容中包含 Orchestrator 目标、Qwen 指令或 Mock指令，则确保用户有足够的任务容量。
+4. 创建消息记录并保存到数据库。
+5. 发布消息事件以通知其他服务或前端。
+6. 根据消息内容创建相应的任务（Orchestrator、Qwen 或 Mock）。
+7. 如果创建了任务，则提交数据库事务并广播任务创建事件，同时将任务提交到 Celery 队列执行，并保存 Celery 任务 ID 以便后续取消。
+8. 返回创建的消息记录。
+"""
 @router.post("/messages", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
 async def create_message(
     payload: MessageCreate,
@@ -77,6 +88,7 @@ async def create_message(
     db.commit()
     db.refresh(message)
 
+    # 1. 发布消息事件，通知前端或其他服务有新消息
     await event_service.publish_message_event(message)
 
     orchestrator_task = create_orchestrator_tasks_from_message(db, conversation, payload.content)
@@ -84,6 +96,8 @@ async def create_message(
         # 确保提交任务到数据库后再发送广播
         db.commit()
         await broadcast_task_event(orchestrator_task, "task.created")
+        # 将任务提交到 Celery 队列执行，请worker稍后执行这个任务
+        # 首次执行时，直接传入新的 initial_state，图会根据状态流转到各个节点
         result = agent_tasks.run_orchestrator_task.delay(orchestrator_task.id)
         # 保存 Celery ID 到数据库以便后续取消
         orchestrator_task.celery_task_id = result.id
@@ -94,6 +108,7 @@ async def create_message(
     if qwen_task is not None:
         db.commit()
         await broadcast_task_event(qwen_task, "task.created")
+        # .delay()将任务提交到 Celery 队列执行，请worker稍后执行这个任务
         result = agent_tasks.run_agent_task.delay(qwen_task.id)
         qwen_task.celery_task_id = result.id
         db.commit()

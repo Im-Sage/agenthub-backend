@@ -14,6 +14,8 @@ test_repo/
 test_repo2/
 alembic/
 tests/
+/langgraph_checkpoints.sqlite3
+/.pytest-task2-review/
 
 # Frontend
 agenthub-frontend/

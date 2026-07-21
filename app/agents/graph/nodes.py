@@ -95,10 +95,11 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
             plan_metadata = {
                 "plan": plan,
                 "child_ids": child_ids,
-                "requires_plan_confirmation": True,
+                "requires_plan_confirmation": True, # 虽然 plan 已经生成，但需要用户确认后才能执行
                 "plan_status": "awaiting_confirmation",
             }
             parent_task.status = TaskStatus.PENDING
+    # 使用 LLM 生成计划
             parent_task.result_summary = f"Orchestrator plan generated with {len(plan)} step(s). Awaiting confirmation."
             parent_task.metadata_json = json.dumps(plan_metadata, ensure_ascii=False)
             parent_task.finished_at = None
@@ -108,6 +109,7 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
         db.close()
 
     return {
+                # planner 生成的每个步骤都创建一个子任务，并将子任务 ID 存储在 child_ids 中
         "plan": plan,
         "current_step_index": 0,
         "current_agent": plan[0]["agent"] if plan else None,
@@ -121,8 +123,20 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
     }
 
 async def approval_node(state: AgentState) -> Dict[str, Any]:
+    # interrupt 是 langgraph 提供的一个函数，用于在执行过程中暂停并等待外部输入，这里用于等待用户对计划的批准或拒绝
+    # LangGraph会将interrupt携带的数据暴露给调用方
+    """
+    假设用户点击，后端可能会通过
+    Command(
+    resume={
+        "approved": True
+        }
+    )
+    恢复后，LangGraph会将resume携带的数据传给approval_node的state中，state["approved"]就会是True
+    """
     decision = interrupt(
         {
+            # 这些数据都是从 state 中获取的，传递给调用方，让调用方知道当前任务的状态和计划内容
             "type": "orchestrator_plan_approval",
             "task_id": state["task_id"],
             "plan": state["plan"],
@@ -130,7 +144,7 @@ async def approval_node(state: AgentState) -> Dict[str, Any]:
     )
 
     approved = (
-        bool(decision.get("approved"))
+        bool(decision.get("approved")) # approved 是用户点击的结果，如果用户点击了批准，就会返回 True，否则返回 False
         if isinstance(decision, dict)
         else bool(decision)
     )
@@ -152,6 +166,7 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
         return {
             "is_finished": True,
             "current_agent": None,
+    # current_step_index是当前执行的步骤索引，如果已经超过计划长度，说明执行完成，一共就有三个步骤，索引分别是0、1、2，如果current_step_index >= 3，就说明执行完成
             "current_instruction": None,
             "errors": [],
         }
@@ -184,6 +199,7 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
                 f"\nCurrent workspace: {repo_path}\n"
                 "When changing files, use these exact file operation markers:\n"
                 "[FILE: relative/path]\n```language\ncontent\n```\n"
+        # repo_path 是当前工作目录，如果有 repo_path，就说明需要在本地文件系统中进行文件操作，所以需要告诉 LLM 如何输出文件操作指令
                 "[DELETE: relative/path]\n"
                 "[RENAME: old/relative/path -> new/relative/path]\n"
                 "Do not output code blocks without a [FILE: ] marker."
@@ -196,6 +212,7 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
                 await task_service.broadcast_task_log(
                     child_task,
                     "Detected previous errors, attempting self-healing...",
+        # 如果上一次执行失败了，就把错误信息传给 LLM，让它尝试自愈
                 )
             messages.append(
                 HumanMessage(
