@@ -67,7 +67,7 @@ def install_plan_node_fakes(monkeypatch, parent_metadata, generated_plan):
         events.append((task, event_name))
 
     monkeypatch.setattr(nodes, "SessionLocal", lambda: fake_db)
-    monkeypatch.setattr(nodes, "get_llm", lambda: FakeLlm())
+    monkeypatch.setattr(nodes, "get_chat_llm", lambda: FakeLlm())
     monkeypatch.setattr(task_service, "create_subtask", fake_create_subtask)
     monkeypatch.setattr(
         task_service,
@@ -165,7 +165,7 @@ def test_approval_node_consumes_resume_value_without_side_effects(
 
     monkeypatch.setattr(nodes, "interrupt", fake_interrupt)
     monkeypatch.setattr(nodes, "SessionLocal", forbidden_side_effect)
-    monkeypatch.setattr(nodes, "get_llm", forbidden_side_effect)
+    monkeypatch.setattr(nodes, "get_chat_llm", forbidden_side_effect)
 
     plan = [{"agent": "backend", "instruction": "Implement persistence"}]
     result = asyncio.run(

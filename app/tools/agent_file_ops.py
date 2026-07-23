@@ -1,4 +1,13 @@
+"""
+Legacy compatibility parser for historical AgentHub file-operation markers.
+
+Primary agent execution uses native LLM Tool Calling and ToolRegistry.
+This parser exists only as a temporary fallback while older model responses
+or saved workflows may still emit [FILE:], [DELETE:], and [RENAME:] markers.
+"""
+
 import re
+
 from app.tools.base import ToolCallRequest
 from app.tools.registry import tool_registry
 

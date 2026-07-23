@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     aliyun_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     aliyun_model: str = "qwen-plus"
     aliyun_timeout_seconds: float = 120.0
+    agent_tool_max_rounds: int = 8
+    agent_legacy_file_protocol_fallback: bool = True
 
     github_token: str | None = None
     

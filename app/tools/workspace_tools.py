@@ -73,6 +73,17 @@ async def workspace_delete_file(request: ToolCallRequest) -> ToolCallResult:
         db.close()
 
 
+"""
+workspace_read_file 函数用于读取当前仓库工作区中的 UTF-8 文本文件。
+它接受一个 ToolCallRequest 对象作为参数，该对象包含以下字段：
+- local_path: 当前仓库的本地路径。
+- target_file: 要读取的目标文件的相对路径。
+函数返回一个 ToolCallResult 对象，表示读取操作的结果。该对象包含以下字段：
+- success: 布尔值，表示操作是否成功。
+- content: 字符串，表示读取的文件内容。
+- structured_content: 字典，包含文件路径和内容的结构化信息。
+如果读取操作失败，函数将返回一个包含错误信息的 ToolCallResult 对象。 
+"""
 async def workspace_read_file(request: ToolCallRequest) -> ToolCallResult:
     local_path = request.arguments.get("local_path")
     target_file = request.arguments.get("target_file")
@@ -239,7 +250,7 @@ def register_workspace_tools() -> None:
                 "required": ["local_path", "target_file", "content"],
             },
         ),
-        workspace_write_file,
+        workspace_write_file, # 回调函数
     )
     
     tool_registry.register(
