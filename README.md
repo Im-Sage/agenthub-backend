@@ -19,8 +19,9 @@ AgentHub 是一个面向软件开发场景的 AI Agent 协作平台。用户可�
 - WebSocket 事件推送
 - LangGraph Orchestrator 任务拆解
 - Orchestrator 计划确认后执行
-- Agent 修改真实 workspace 文件
-- `[FILE:]`、`[DELETE:]`、`[RENAME:]` 文件操作协议
+- Agent 通过原生 LLM Tool Calling 修改真实 workspace 文件
+- ToolRegistry 统一执行风险检查、审计、任务日志和 Local / MCP / Hybrid 路由
+- `[FILE:]`、`[DELETE:]`、`[RENAME:]` 仅作为迁移期兼容协议
 - CodeChange 生成 Diff
 - CodeChange Accept / Reject / Revise
 - CodeChange 版本链：`parent_code_change_id`、`revision_index`
@@ -127,6 +128,8 @@ ALIYUN_API_KEY=
 ALIYUN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ALIYUN_MODEL=qwen-plus
 ALIYUN_TIMEOUT_SECONDS=120
+AGENT_TOOL_MAX_ROUNDS=8
+AGENT_LEGACY_FILE_PROTOCOL_FALLBACK=true
 
 GITHUB_TOKEN=
 
@@ -312,9 +315,42 @@ New-NetFirewallRule -DisplayName "AgentHub Frontend 5173" -Direction Inbound -Pr
    - `base_branch`
    - `head_branch`
 
-## 文件操作协议
+## Agent 工具调用架构
 
-Agent 修改文件时必须使用以下标记：
+Agent 修改 workspace 的主路径是原生 LLM Tool Calling：
+
+```text
+LLM Native Tool Calling
+-> ToolCallRequest
+-> ToolRegistry
+-> Local / MCP / Hybrid
+-> WorkspaceService
+```
+
+职责边界：
+
+- LLM 只能从当前 Agent profile 暴露的结构化工具中选择。
+- AgentHub 将模型安全名称映射回 ToolRegistry 内部名称。
+- `local_path` 不暴露给模型，而是由服务端使用可信 `repo_path` 覆盖注入。
+- ToolRegistry 负责风险检查、审计、任务日志以及 Local / MCP / Hybrid 路由。
+- WorkspaceService 负责最终路径校验和真实文件操作。
+- `workspace.delete_file` 属于高风险工具，当前阶段不向模型暴露。
+
+模型工具调用结果会作为 `ToolMessage` 返回模型，直到模型生成最终文本回复。单次执行最多进行 `AGENT_TOOL_MAX_ROUNDS` 轮，默认值为 `8`。
+
+### Legacy 文本协议 fallback
+
+历史 `[FILE:]`、`[DELETE:]`、`[RENAME:]` 文本协议没有被删除，但只作为 temporary compatibility fallback：
+
+```text
+模型没有返回 tool_calls
++ AGENT_LEGACY_FILE_PROTOCOL_FALLBACK=true
++ 回复仍包含历史 marker
+-> apply_file_operations_with_tools
+-> ToolRegistry
+```
+
+兼容 marker 格式如下：
 
 ````text
 [FILE: relative/path]
@@ -326,6 +362,14 @@ Agent 修改文件时必须使用以下标记：
 
 [RENAME: old/path -> new/path]
 ````
+
+关闭 fallback：
+
+```env
+AGENT_LEGACY_FILE_PROTOCOL_FALLBACK=false
+```
+
+关闭后，即使普通文本回复包含历史 marker，也不会执行文件操作。新代码不得直接调用 marker parser，现有 parser 仅用于旧模型响应或已保存工作流的迁移兼容。
 
 安全限制：
 

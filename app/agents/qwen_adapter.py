@@ -1,73 +1,76 @@
-import httpx
-from typing import Any
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.agents.base import AgentAdapter, AgentRunRequest, AgentRunResult
+from app.agents.base import (
+    AgentAdapter,
+    AgentRunRequest,
+    AgentRunResult,
+)
+from app.agents.llm_factory import get_chat_llm
+from app.agents.tool_calling import run_tool_calling_agent
 from app.core.config import settings
-from app.core.logging import get_logger
-from app.services.workspace_service import WorkspaceError, workspace_service
-
-
-logger = get_logger("agent.qwen")
-
-
-FILE_OPERATION_PROMPT = """
-When changing files, use these exact file operation markers:
-[FILE: relative/path]
-```language
-content
-```
-[DELETE: relative/path]
-[RENAME: old/relative/path -> new/relative/path]
-Do not output code blocks without a [FILE: ] marker.
-""".strip()
 
 
 class QwenAgentAdapter(AgentAdapter):
-    async def run(self, request: AgentRunRequest) -> AgentRunResult:
+    async def run(
+        self,
+        request: AgentRunRequest,
+    ) -> AgentRunResult:
         if not settings.aliyun_api_key:
             raise RuntimeError("ALIYUN_API_KEY is not configured.")
 
-        base_system_prompt = request.context.get(
+        agent_code = str(
+            request.context.get("agent_code") or "qwen"
+        )
+
+        system_prompt = request.context.get(
             "system_prompt",
-            "You are an AI engineer in AgentHub. Answer concisely and professionally.",
+            "You are an AI engineer in AgentHub.",
         )
 
         if request.repo_path:
-            base_system_prompt += f"\n\nCurrent workspace: {request.repo_path}\n{FILE_OPERATION_PROMPT}"
+            system_prompt += (
+                "\n\nYou have access to repository workspace tools. "
+                "Use tools to inspect and modify the repository. "
+                "Read relevant files before overwriting them. "
+                "Do not emit custom [FILE:], [DELETE:], or [RENAME:] "
+                "markers for normal workspace operations."
+            )
 
-        payload = {
-            "model": settings.aliyun_model,
-            "messages": [
-                {"role": "system", "content": base_system_prompt},
-                {"role": "user", "content": request.instruction},
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {settings.aliyun_api_key}",
-            "Content-Type": "application/json",
-        }
-        url = f"{settings.aliyun_base_url.rstrip('/')}/chat/completions"
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=request.instruction),
+        ]
 
-        async with httpx.AsyncClient(timeout=settings.aliyun_timeout_seconds) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        previous_error = request.context.get("previous_error")
+        if previous_error:
+            messages.append(
+                HumanMessage(
+                    content=(
+                        "Previous execution failed with this error:\n"
+                        f"{previous_error}\n"
+                        "Inspect the current workspace and fix it."
+                    )
+                )
+            )
 
-        content = data["choices"][0]["message"]["content"]
-        changed_files: list[str] = []
-        if request.repo_path:
-            changed_files = await self._apply_file_changes(request.repo_path, content, request.task)
+        # 调用 run_tool_calling_agent 来执行智能体的操作
+        result = await run_tool_calling_agent(
+            llm=get_chat_llm(),
+            messages=messages,
+            agent_code=agent_code,
+            repo_path=request.repo_path,
+            task_id=request.task_id,
+            conversation_id=request.conversation_id,
+        )
 
         return AgentRunResult(
             status="success",
-            summary=content,
-            changed_files=changed_files,
-            logs=f"provider=aliyun model={settings.aliyun_model} files_changed={len(changed_files)}",
+            summary=result.summary,
+            changed_files=result.changed_files,
+            logs=(
+                f"provider=aliyun "
+                f"model={settings.aliyun_model} "
+                f"files_changed={len(result.changed_files)} "
+                f"legacy_fallback={result.used_legacy_fallback}"
+            ),
         )
-
-    async def _apply_file_changes(self, repo_path: str, content: str, task: Any | None = None) -> list[str]:
-        try:
-            return await workspace_service.apply_operations_from_text(repo_path, content, task=task)
-        except WorkspaceError as exc:
-            logger.exception("apply_file_operations_failed error=%s", exc)
-            return []

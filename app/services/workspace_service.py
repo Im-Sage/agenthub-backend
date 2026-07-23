@@ -166,6 +166,12 @@ class WorkspaceService:
         source_path.replace(target_path)
 
     async def apply_operations_from_text(self, local_path: str, content: str, task: Task | None = None) -> list[str]:
+        """Deprecated compatibility parser for historical file markers.
+
+        New agent execution paths must use native LLM Tool Calling through
+        ToolRegistry. This method remains temporarily available for older
+        callers and saved workflows that still emit text operation markers.
+        """
         changed_files: list[str] = []
 
         for match in re.finditer(r"\[RENAME:\s*(.+?)\s*->\s*(.+?)\s*\]", content):

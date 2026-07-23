@@ -3,26 +3,15 @@ import re
 from datetime import datetime
 from typing import Any, Dict
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
 
+from app.agents.base import AgentRunRequest
 from app.agents.graph.state import AgentState
-from app.core.config import settings
+from app.agents.llm_factory import get_chat_llm
 from app.db.session import SessionLocal
 from app.models.task import Task
 from app.schemas.enums import MessageType, SenderType, TaskStatus
-from app.services.workspace_service import workspace_service
-
-
-def get_llm():
-    return ChatOpenAI(
-        model=settings.aliyun_model,
-        openai_api_key=settings.aliyun_api_key,
-        openai_api_base=settings.aliyun_base_url,
-        timeout=settings.aliyun_timeout_seconds,
-        temperature=0,
-    )
 
 
 def _extract_plan(content: str) -> list[dict[str, str]]:
@@ -62,7 +51,7 @@ def _child_ids_from_state(state: AgentState) -> list[int]:
 async def plan_node(state: AgentState) -> Dict[str, Any]:
     from app.services import task_service
 
-    llm = get_llm()
+    llm = get_chat_llm()
     messages = [
         SystemMessage(
             content=(
@@ -171,7 +160,6 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
             "errors": [],
         }
 
-    llm = get_llm()
     agent_code = state.get("current_agent") or plan[current_step_index]["agent"]
     instruction = state.get("current_instruction") or plan[current_step_index]["instruction"]
     repo_path = state.get("repo_path")
@@ -194,61 +182,56 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
 
         agent_obj = task_service.get_or_create_agent(db, agent_code)
         system_prompt = agent_obj.system_prompt or f"You are a {agent_code} engineer."
-        if repo_path:
-            system_prompt += (
-                f"\nCurrent workspace: {repo_path}\n"
-                "When changing files, use these exact file operation markers:\n"
-                "[FILE: relative/path]\n```language\ncontent\n```\n"
-        # repo_path 是当前工作目录，如果有 repo_path，就说明需要在本地文件系统中进行文件操作，所以需要告诉 LLM 如何输出文件操作指令
-                "[DELETE: relative/path]\n"
-                "[RENAME: old/relative/path -> new/relative/path]\n"
-                "Do not output code blocks without a [FILE: ] marker."
-            )
-
-        messages = [SystemMessage(content=system_prompt), HumanMessage(content=instruction)]
+        context = {
+            "agent_code": agent_code,
+            "system_prompt": system_prompt,
+        }
 
         if state.get("errors"):
             if child_task:
                 await task_service.broadcast_task_log(
                     child_task,
                     "Detected previous errors, attempting self-healing...",
-        # 如果上一次执行失败了，就把错误信息传给 LLM，让它尝试自愈
                 )
-            messages.append(
-                HumanMessage(
-                    content=(
-                        "Previous execution failed with this error:\n"
-                        f"{state['errors'][-1]}\n"
-                        "Fix the issue and answer again."
-                    )
-                )
+            context["previous_error"] = state["errors"][-1]
+
+        adapter = task_service.get_adapter(agent_obj)
+        result = await adapter.run(
+            AgentRunRequest(
+                task_id=(
+                    child_task.id
+                    if child_task
+                    else state["task_id"]
+                ),
+                conversation_id=state["conversation_id"],
+                instruction=instruction,
+                repo_path=repo_path,
+                context=context,
+                task=child_task,
             )
+        )
 
-        response = await llm.ainvoke(messages)
-        content = str(response.content)
-
-        changed_files: list[str] = []
-        if repo_path:
-            from app.tools.agent_file_ops import apply_file_operations_with_tools
-            changed_files = await apply_file_operations_with_tools(
-                local_path=repo_path,
-                content=content,
-                task_id=child_task.id if child_task else None,
-                conversation_id=state.get("conversation_id"),
+        if result.status != "success":
+            raise RuntimeError(
+                result.summary or "Agent execution failed"
             )
 
         if child_task:
             child_task.status = TaskStatus.SUCCESS
-            child_task.result_summary = content
+            child_task.result_summary = result.summary
             child_task.finished_at = datetime.utcnow()
             db.commit()
             await task_service.broadcast_task_event(child_task, "task.updated")
 
         return {
             "execution_results": [
-                {"step": current_step_index, "content": content, "files": changed_files}
+                {
+                    "step": current_step_index,
+                    "content": result.summary,
+                    "files": result.changed_files,
+                }
             ],
-            "messages": [response],
+            "messages": [AIMessage(content=result.summary)],
             "errors": [],
         }
     except Exception as exc:

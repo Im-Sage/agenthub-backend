@@ -6,7 +6,9 @@ from app.tools.base import ToolCallRequest, ToolCallResult, ToolDefinition, Tool
 
 ToolHandler = Callable[[ToolCallRequest], Awaitable[ToolCallResult]]
 
-
+# 整个系统中，ToolRegistry 类是一个核心组件，用于管理和调用各种工具。
+# 它提供了注册工具、列出工具、获取工具定义以及调用工具的功能。
+# 通过 ToolRegistry，开发者可以轻松地将新的工具集成到系统中，并确保在调用工具时能够正确处理参数、执行逻辑以及记录审计信息。
 class ToolRegistry:
     def __init__(self):
         # 存储工具的元数据（名称、描述、参数定义、风险等级）。
@@ -14,6 +16,15 @@ class ToolRegistry:
         # 存储工具的实际处理函数，供本地调用使用。
         self._handlers: dict[str, ToolHandler] = {}
 
+    """
+    当开发者注册一个新工具时，调用 register 方法将工具的定义和处理函数添加到注册表中。
+    这样，工具就可以被系统识别，并在需要时调用其处理函数。
+    1. definition: ToolDefinition 对象，包含工具的名称、描述、参数定义和风险等级。
+    2. handler: ToolHandler 异步函数，用于处理工具调用请求，返回 ToolCallResult。
+    3. 将 definition 存储在 _definitions 字典中，以工具名称为键。
+    4. 将 handler 存储在 _handlers 字典中，以工具名称为键。
+    5. 这样，系统就可以根据工具名称查找其定义和处理函数，并在调用时执行相应的逻辑。
+    """
     def register(self, definition: ToolDefinition, handler: ToolHandler) -> None:
         self._definitions[definition.name] = definition
         self._handlers[definition.name] = handler
@@ -52,6 +63,15 @@ class ToolRegistry:
         # 默认使用本地处理，除非在混合模式下没有注册本地处理函数
         return await self._call_local(request)
 
+    """
+    _call_local 方法用于调用在 _handlers 中注册的本地 Python 函数。
+    1. 根据请求的工具名称，从 _handlers 字典中查找对应的处理函数。
+    2. 如果没有找到处理函数，返回一个失败的 ToolCallResult，提示没有注册本地处理函数。
+    3. 如果找到了处理函数，调用它并传入请求对象。
+    4. 如果处理函数执行成功，返回其结果。
+    5. 如果处理函数执行过程中抛出异常，捕获异常并返回一个失败的 ToolCallResult，包含异常信息。
+    6. 这样，系统可以在本地环境中执行工具调用，并处理可能的错误情况，确保调用过程的稳定性和可靠性。
+    """
     async def _call_local(self, request: ToolCallRequest) -> ToolCallResult:
         # 仅调用在 _handlers 中注册的本地 Python 函数，如果没有注册则返回错误
         handler = self._handlers.get(request.name)
