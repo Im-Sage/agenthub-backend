@@ -25,6 +25,20 @@ class OrchestratorPlan(BaseModel):
     steps: list[PlanStep] = Field(min_length=1, max_length=12)
 
 
+class VerificationCheck(BaseModel):
+    name: str
+    success: bool
+    exit_code: int | None
+    summary: str
+    duration_ms: int
+
+
+class VerificationResult(BaseModel):
+    success: bool
+    checks: list[VerificationCheck]
+    failure_summary: str | None = None
+
+
 async def generate_orchestrator_plan(
     llm: Any,
     user_goal: str,

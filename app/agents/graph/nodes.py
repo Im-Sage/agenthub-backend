@@ -12,6 +12,7 @@ from app.agents.llm_factory import get_chat_llm
 from app.db.session import SessionLocal
 from app.models.task import Task
 from app.schemas.enums import MessageType, SenderType, TaskStatus
+from app.services.verification_service import verification_service
 
 def _child_ids_from_state(state: AgentState) -> list[int]:
     try:
@@ -232,23 +233,38 @@ async def verify_node(state: AgentState) -> Dict[str, Any]:
 
     last_result = execution_results[-1]
     instruction = state.get("current_instruction") or ""
-
-    wants_code = any(keyword in instruction.lower() for keyword in ["code", "代码", "写一个"])
-    if state.get("repo_path") and wants_code and not last_result.get("files"):
+    repository_id = state.get("repository_id")
+    user_id = state.get("user_id")
+    if repository_id is None or user_id is None:
         return {
-            "errors": [
-                "Code was requested but the agent reported no changed files."
-            ]
+            "errors": ["Repository and user identity are required for verification."]
         }
 
-    content = str(last_result.get("content") or "")
-    if "python" in instruction.lower() and "def" in content and "SyntaxError" in content:
-        return {"errors": ["Potential Python syntax error detected."]}
+    verification = verification_service.verify(
+        repository_id=repository_id,
+        user_id=user_id,
+        changed_files=list(last_result.get("files") or []),
+        instruction=instruction,
+    )
+    serialized = verification.model_dump()
+    if not verification.success:
+        attempts = state.get("verification_attempts", 0) + 1
+        failure_summary = (
+            verification.failure_summary or "Verification failed."
+        )
+        return {
+            "verification_results": [serialized],
+            "verification_attempts": attempts,
+            "errors": [failure_summary],
+            "is_finished": attempts > 2,
+        }
 
     next_index = current_step_index + 1
     is_finished = next_index >= len(plan)
 
     return {
+        "verification_results": [serialized],
+        "verification_attempts": 0,
         "current_step_index": next_index,
         "current_agent": plan[next_index]["agent"] if not is_finished else None,
         "current_instruction": plan[next_index]["instruction"] if not is_finished else None,
@@ -263,18 +279,42 @@ async def summarize_node(state: AgentState) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         parent_task = db.get(Task, state["task_id"])
-        summary = (
-            "LangGraph orchestrator completed.\n"
-            f"Completed {len(state.get('plan') or [])} steps."
+        verification_failed = (
+            state.get("verification_attempts", 0) > 2
+            and bool(state.get("errors"))
         )
+        if verification_failed:
+            summary = (
+                "LangGraph orchestrator failed verification after "
+                "two automatic repair attempts.\n"
+                f"{state['errors'][-1]}"
+            )
+        else:
+            summary = (
+                "LangGraph orchestrator completed.\n"
+                f"Completed {len(state.get('plan') or [])} steps."
+            )
         if parent_task:
             try:
                 metadata = json.loads(parent_task.metadata_json or "{}")
             except json.JSONDecodeError:
                 metadata = {}
-            metadata["plan_status"] = "executed"
-            parent_task.status = TaskStatus.SUCCESS
+            metadata["plan_status"] = (
+                "verification_failed"
+                if verification_failed
+                else "executed"
+            )
+            parent_task.status = (
+                TaskStatus.FAILED
+                if verification_failed
+                else TaskStatus.SUCCESS
+            )
             parent_task.result_summary = summary
+            parent_task.error_message = (
+                state["errors"][-1]
+                if verification_failed
+                else None
+            )
             parent_task.metadata_json = json.dumps(metadata, ensure_ascii=False)
             parent_task.finished_at = datetime.utcnow()
             db.commit()

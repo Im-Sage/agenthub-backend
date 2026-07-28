@@ -20,6 +20,8 @@ class LangGraphOrchestratorAdapter(AgentAdapter):
             "current_agent": None,
             "current_instruction": None,
             "execution_results": [],
+            "verification_results": [],
+            "verification_attempts": 0,
             "errors": [],
             "awaiting_confirmation": False,
             "approval_status": None,

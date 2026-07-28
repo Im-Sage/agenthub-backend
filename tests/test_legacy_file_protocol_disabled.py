@@ -1,7 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
-from app.agents.graph.nodes import verify_node
+from app.agents.graph import nodes
+from app.agents.graph.schemas import VerificationCheck, VerificationResult
 from app.core.config import Settings
 from app.schemas.enums import CodeChangeStatus
 from app.services.code_change_service import create_revision_task
@@ -56,9 +57,33 @@ def test_revision_task_requires_workspace_tools_instead_of_markers():
     assert "If files need to be changed, use" not in revision_task.instruction
 
 
-def test_verifier_reports_missing_changed_files_without_legacy_markers():
+def test_verifier_uses_changed_files_without_legacy_markers(monkeypatch):
+    calls = []
+
+    class FakeVerificationService:
+        def verify(self, **kwargs):
+            calls.append(kwargs)
+            return VerificationResult(
+                success=False,
+                checks=[
+                    VerificationCheck(
+                        name="no_applicable_checks",
+                        success=False,
+                        exit_code=None,
+                        summary="No applicable verification checks.",
+                        duration_ms=0,
+                    )
+                ],
+                failure_summary="No applicable verification checks.",
+            )
+
+    monkeypatch.setattr(
+        nodes,
+        "verification_service",
+        FakeVerificationService(),
+    )
     result = asyncio.run(
-        verify_node(
+        nodes.verify_node(
             {
                 "plan": [
                     {
@@ -72,12 +97,18 @@ def test_verifier_reports_missing_changed_files_without_legacy_markers():
                     {"content": "Implemented the service", "files": []}
                 ],
                 "repo_path": "trusted-workspace",
+                "repository_id": 23,
+                "user_id": 29,
             }
         )
     )
 
-    assert result == {
-        "errors": [
-            "Code was requested but the agent reported no changed files."
-        ]
-    }
+    assert calls == [
+        {
+            "repository_id": 23,
+            "user_id": 29,
+            "changed_files": [],
+            "instruction": "Write code for the service",
+        }
+    ]
+    assert result["errors"] == ["No applicable verification checks."]

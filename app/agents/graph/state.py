@@ -24,6 +24,8 @@ class AgentState(TypedDict):
     
     # 结果与自愈
     execution_results: Annotated[List[Dict[str, Any]], operator.add]
+    verification_results: Annotated[List[Dict[str, Any]], operator.add]
+    verification_attempts: int
     errors: List[str]
     
     # 状态标记
