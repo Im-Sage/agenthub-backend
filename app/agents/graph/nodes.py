@@ -235,7 +235,7 @@ async def verify_node(state: AgentState) -> Dict[str, Any]:
     if state.get("repo_path") and wants_code and not last_result.get("files"):
         return {
             "errors": [
-                "Code was requested but no [FILE: path] code block was produced, so no file could be saved."
+                "Code was requested but the agent reported no changed files."
             ]
         }
 

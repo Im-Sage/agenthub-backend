@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     aliyun_model: str = "qwen-plus"
     aliyun_timeout_seconds: float = 120.0
     agent_tool_max_rounds: int = 8
-    agent_legacy_file_protocol_fallback: bool = True
+    agent_legacy_file_protocol_fallback: bool = False
 
     github_token: str | None = None
     

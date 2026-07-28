@@ -21,7 +21,7 @@ AgentHub 是一个面向软件开发场景的 AI Agent 协作平台。用户可�
 - Orchestrator 计划确认后执行
 - Agent 通过原生 LLM Tool Calling 修改真实 workspace 文件
 - ToolRegistry 统一执行风险检查、审计、任务日志和 Local / MCP / Hybrid 路由
-- `[FILE:]`、`[DELETE:]`、`[RENAME:]` 仅作为迁移期兼容协议
+- `[FILE:]`、`[DELETE:]`、`[RENAME:]` 默认关闭，仅保留显式迁移兼容
 - CodeChange 生成 Diff
 - CodeChange Accept / Reject / Revise
 - CodeChange 版本链：`parent_code_change_id`、`revision_index`
@@ -344,7 +344,9 @@ LLM Native Tool Calling
 
 ### Legacy 文本协议 fallback
 
-历史 `[FILE:]`、`[DELETE:]`、`[RENAME:]` 文本协议没有被删除，但只作为 temporary compatibility fallback：
+历史 `[FILE:]`、`[DELETE:]`、`[RENAME:]` 文本协议没有被删除，但默认关闭，只作为
+读取历史模型响应或显式迁移场景的 temporary compatibility fallback。原生 Tool Calling
+是新任务唯一的默认文件操作路径。
 
 ```text
 模型没有返回 tool_calls
@@ -367,13 +369,15 @@ LLM Native Tool Calling
 [RENAME: old/path -> new/path]
 ````
 
-关闭 fallback：
+默认配置：
 
 ```env
 AGENT_LEGACY_FILE_PROTOCOL_FALLBACK=false
 ```
 
-关闭后，即使普通文本回复包含历史 marker，也不会执行文件操作。新代码不得直接调用 marker parser，现有 parser 仅用于旧模型响应或已保存工作流的迁移兼容。
+默认关闭时，即使普通文本回复包含历史 marker，也不会执行文件操作。只有运维人员为
+历史兼容显式设置 `AGENT_LEGACY_FILE_PROTOCOL_FALLBACK=true` 时才启用 parser。新代码
+不得直接调用 marker parser，现有 parser 仅用于旧模型响应或已保存工作流的迁移兼容。
 
 安全限制：
 
