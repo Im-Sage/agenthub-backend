@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     aliyun_timeout_seconds: float = 120.0
     agent_tool_max_rounds: int = 8
     agent_legacy_file_protocol_fallback: bool = False
+    agent_command_timeout_seconds: int = 120
+    agent_command_max_output_chars: int = 50_000
+    agent_command_allowed_env: str = (
+        "PATH,PYTHONPATH,HOME,USERPROFILE,TEMP,TMP,SYSTEMROOT,COMSPEC"
+    )
 
     github_token: str | None = None
     

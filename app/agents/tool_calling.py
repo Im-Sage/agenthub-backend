@@ -26,6 +26,10 @@ AGENT_TOOL_PROFILES = {
         "workspace.rename_file",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_type_check",
+        "workspace.run_build",
     },
     "backend": {
         "workspace.read_file",
@@ -35,6 +39,9 @@ AGENT_TOOL_PROFILES = {
         "workspace.rename_file",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_type_check",
     },
     "frontend": {
         "workspace.read_file",
@@ -44,6 +51,9 @@ AGENT_TOOL_PROFILES = {
         "workspace.rename_file",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_build",
     },
     "reviewer": {
         "workspace.read_file",
@@ -51,6 +61,10 @@ AGENT_TOOL_PROFILES = {
         "workspace.search_code",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_type_check",
+        "workspace.run_build",
     },
 }
 
