@@ -96,6 +96,10 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+后端将 `mcp[cli]` 固定在 `>=1.27,<2` 的 MCP SDK v1 兼容范围内，以保持现有
+`FastMCP`、`ClientSession` 和 `streamable_http_client` 调用方式稳定。本轮不升级到
+MCP SDK v2；升级前需要单独验证 Server、Client 与 Streamable HTTP 的兼容性。
+
 安装前端依赖：
 
 ```powershell
