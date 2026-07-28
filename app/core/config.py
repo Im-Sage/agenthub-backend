@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     agent_command_allowed_env: str = (
         "PATH,PYTHONPATH,HOME,USERPROFILE,TEMP,TMP,SYSTEMROOT,COMSPEC"
     )
+    embedding_provider: str = "hash"
+    embedding_model: str = "text-embedding-v4"
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
+    embedding_dimensions: int = 256
+    rag_chunk_batch_size: int = 32
 
     github_token: str | None = None
     

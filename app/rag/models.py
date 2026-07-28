@@ -10,3 +10,12 @@ class CodeChunkDraft(BaseModel):
     end_line: int
     content: str
     content_hash: str
+
+
+class IndexSummary(BaseModel):
+    repository_id: int
+    files_indexed: int = 0
+    files_unchanged: int = 0
+    files_deleted: int = 0
+    chunks_written: int = 0
+    chunks_deleted: int = 0

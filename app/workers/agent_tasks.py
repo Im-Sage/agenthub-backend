@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime
 from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
@@ -20,6 +21,26 @@ register_builtin_tools()
 logger = get_logger("worker.agent_tasks")
 
 
+def dispatch_incremental_index(
+    repository_id: int | None,
+    changed_files: list[str],
+) -> None:
+    if not repository_id or not changed_files:
+        return
+    try:
+        from app.workers.index_tasks import update_repository_files_task
+
+        update_repository_files_task.delay(
+            repository_id,
+            changed_files,
+        )
+    except Exception:
+        logger.exception(
+            "repository_index_dispatch_failed repository_id=%s",
+            repository_id,
+        )
+
+
 def maybe_generate_revision_code_change(db, task: Task, conversation: Conversation):
     if task.status not in [TaskStatus.SUCCESS, TaskStatus.SUCCESS.value] or task.task_type != "revision":
         return None
@@ -35,6 +56,11 @@ def maybe_generate_revision_code_change(db, task: Task, conversation: Conversati
     try:
         code_change = sync_run_async(repo_service.generate_code_change(db, task, repo))
         sync_run_async(event_service.publish_code_change_event(task.conversation_id, code_change))
+        try:
+            changed_files = json.loads(code_change.changed_files or "[]")
+        except (json.JSONDecodeError, TypeError):
+            changed_files = []
+        dispatch_incremental_index(repo.id, changed_files)
         return code_change
     except SoftTimeLimitExceeded as exc:
         db.rollback()
@@ -146,6 +172,11 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
         db.refresh(task)
         # 实时推送：任务执行完成
         sync_run_async(task_service.broadcast_task_event(task, "task.updated"))
+        if task.status == TaskStatus.SUCCESS:
+            dispatch_incremental_index(
+                repository_id,
+                list(result.changed_files or []),
+            )
 
         if create_reply_message:
             agent_message = Message(
