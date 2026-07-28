@@ -245,3 +245,27 @@ flowchart LR
     F -->|其它 Origin| H[拒绝]
 ```
 
+## 12. Hardened Agent 开发闭环
+
+```mermaid
+flowchart TD
+    U[User Instruction] --> P[Structured Plan]
+    P --> C[ContextAssembler]
+    C --> C1[Conversation Context]
+    C --> C2[Repository Summary]
+    C --> C3[Hybrid Code Retrieval]
+    C --> C4[Previous Results and Errors]
+    C --> Q[Qwen Native Tool Calling]
+    Q --> T[ToolRegistry]
+    T --> R{Local / MCP / Hybrid}
+    R --> A[RepositoryResolver Authorization]
+    A --> W[Workspace and Command Tools]
+    W --> V[VerificationService]
+    V -->|failure, at most two repairs| Q
+    V -->|success| D[CodeChange / Review / PR]
+```
+
+模型可见工具参数不包含 `repository_id`、`user_id` 或 `local_path`。可信 identity 来自 Task/Conversation；RepositoryResolver 验证归属，WorkspaceService 验证路径，CommandRunner 限制 argv，VerificationService 使用真实命令判定是否推进。
+
+旧图第 4 节中的 FILE/DELETE/RENAME 标记仅代表历史兼容流程；当前默认路径是 Native Tool Calling，legacy marker fallback 默认关闭。
+

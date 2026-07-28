@@ -21,6 +21,11 @@ AgentHub 是一个面向软件开发场景的 AI Agent 协作平台。用户可�
 - Orchestrator 计划确认后执行
 - Agent 通过原生 LLM Tool Calling 修改真实 workspace 文件
 - ToolRegistry 统一执行风险检查、审计、任务日志和 Local / MCP / Hybrid 路由
+- ContextAssembler 统一 Conversation、Repository、RAG、执行结果和错误预算
+- 关键词 + 向量 RRF 混合代码检索与自动增量索引
+- 受限 test/lint/type/build CommandRunner 与真实 VerificationService
+- 验证失败最多两次自动修复，不以文本自报成功
+- 脱敏结构化 Agent 事件与可重复 offline evaluation gate
 - `[FILE:]`、`[DELETE:]`、`[RENAME:]` 默认关闭，仅保留显式迁移兼容
 - CodeChange 生成 Diff
 - CodeChange Accept / Reject / Revise
@@ -81,6 +86,7 @@ agenthub-backend/
 ├── agenthub-frontend/       # 前端项目
 ├── alembic/                 # 数据库迁移
 ├── docs/flowcharts.md       # 详细流程图
+├── evals/                   # 固定数据集、指标、runner 和报告
 ├── tests/                   # 后端测试
 ├── docker-compose.yml       # Redis 等依赖服务
 └── README.md
@@ -582,3 +588,13 @@ Live evaluation is optional and is skipped cleanly when no API key is configured
 ```powershell
 python -m evals.run --mode live --output evals/reports/live.json
 ```
+
+## Hardened Agent documentation
+
+- [Agent architecture](docs/agent-architecture.md)
+- [Agent security model](docs/agent-security-model.md)
+- [Agent evaluation guide](docs/agent-evaluation.md)
+- [10-minute demo script](docs/demo/agent-internship-demo.md)
+- [System flowcharts](docs/flowcharts.md)
+
+关键安全配置包括 `MCP_INTERNAL_TOKEN`、`MCP_TOOL_MODE`、受限命令超时/输出上限、Embedding provider，以及 `AGENT_CONTEXT_*` 分类预算。默认 embedding provider 为本地 deterministic hash；生产可切换 OpenAI-compatible endpoint。不要向模型参数、日志或代码仓库暴露 token 与绝对 workspace 路径。
