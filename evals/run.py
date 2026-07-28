@@ -30,6 +30,20 @@ from evals.report import write_report
 
 CASES_ROOT = Path(__file__).resolve().parent / "cases"
 logger = get_logger("eval")
+_EVAL_EXTENSIONS = {
+    ".go",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 
 
 class FakeStructuredPlanner:
@@ -44,6 +58,30 @@ class FakeCommandRunner:
             (),
             {"success": True, "check_name": check_name},
         )()
+
+
+class AppWorkspaceSearch:
+    def search_code(
+        self,
+        local_path: str,
+        query: str,
+        **kwargs,
+    ):
+        return workspace_service.search_code(
+            local_path,
+            query=query,
+            target_dir="app",
+            max_results=kwargs.get("max_results", 30),
+        )
+
+
+def evaluation_file_paths() -> list[str]:
+    app_root = PROJECT_ROOT / "app"
+    return sorted(
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in app_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in _EVAL_EXTENSIONS
+    )
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -143,12 +181,12 @@ async def retrieval_results(cases: list[dict]) -> list[dict]:
             embedding_provider=embeddings,
             batch_size=32,
         )
-        await index_service.index_repository(1)
+        await index_service.update_files(1, evaluation_file_paths())
         retriever = HybridCodeRetriever(
             session_factory=sessions,
             repository_resolver=resolver,
             embedding_provider=embeddings,
-            workspace_search=workspace_service,
+            workspace_search=AppWorkspaceSearch(),
         )
         results: list[dict] = []
         for case in cases:

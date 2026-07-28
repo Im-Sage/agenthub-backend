@@ -9,7 +9,12 @@ from evals.metrics import (
     threshold_failures,
 )
 from evals.report import markdown_report, write_report
-from evals.run import CASES_ROOT, load_jsonl, run_evaluation
+from evals.run import (
+    CASES_ROOT,
+    evaluation_file_paths,
+    load_jsonl,
+    run_evaluation,
+)
 
 
 def test_dataset_minimum_sizes_and_required_fields():
@@ -33,6 +38,14 @@ def test_dataset_minimum_sizes_and_required_fields():
         {"id", "query", "expected_paths"} <= set(case)
         for case in retrieval
     )
+
+
+def test_offline_retrieval_corpus_excludes_generated_reports():
+    paths = evaluation_file_paths()
+
+    assert paths
+    assert all(path.startswith("app/") for path in paths)
+    assert not any("evals/reports" in path for path in paths)
 
 
 def test_pure_rate_and_average_metrics():

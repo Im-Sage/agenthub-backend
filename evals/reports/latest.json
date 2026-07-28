@@ -3,8 +3,8 @@
   "metrics": {
     "planner_schema_success_rate": 1.0,
     "planner_fallback_rate": 0.05,
-    "retrieval_recall_at_5": 0.8,
-    "retrieval_mrr": 0.23555555555555555,
+    "retrieval_recall_at_5": 0.9333333333333333,
+    "retrieval_mrr": 0.8,
     "context_truncation_rate": 0.05,
     "tool_call_success_rate": 1.0,
     "verification_pass_rate": 1.0,
@@ -14,36 +14,6 @@
   "threshold_failures": [],
   "failed_cases": [
     {
-      "id": "retrieval-001",
-      "type": "retrieval",
-      "reason": "expected_path_not_in_top_5",
-      "expected": [
-        "app/agents/tool_calling.py"
-      ],
-      "actual": [
-        "agenthub-backend.md",
-        "agenthub_native_tool_calling_codex_plan.md",
-        "agenthub_mcp_refactor_plan.md",
-        "agenthub_native_tool_calling_codex_plan.md",
-        "agenthub_mcp_refactor_plan.md"
-      ]
-    },
-    {
-      "id": "retrieval-012",
-      "type": "retrieval",
-      "reason": "expected_path_not_in_top_5",
-      "expected": [
-        "app/agents/graph/workflow.py"
-      ],
-      "actual": [
-        "app/agents/graph/runtime.py",
-        "evals/cases/retrieval_cases.jsonl",
-        "docs/superpowers/plans/agenthub_langgraph_hitl_codex_plan.md",
-        "tests/test_langgraph_interrupt_resume.py",
-        "agenthub_mcp_refactor_plan.md"
-      ]
-    },
-    {
       "id": "retrieval-015",
       "type": "retrieval",
       "reason": "expected_path_not_in_top_5",
@@ -51,11 +21,11 @@
         "app/agents/tool_calling.py"
       ],
       "actual": [
-        "docs/agent-security-model.md",
-        "evals/cases/retrieval_cases.jsonl",
-        "tests/test_agent_evaluation.py",
-        "agenthub_native_tool_calling_codex_plan.md",
-        "README.md"
+        "app/tools/registry.py",
+        "app/tools/registry.py",
+        "app/agents/graph/nodes.py",
+        "app/agents/graph/nodes.py",
+        "app/__init__.py"
       ]
     }
   ],
