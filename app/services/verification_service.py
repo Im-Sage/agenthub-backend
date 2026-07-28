@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 from app.agents.graph.schemas import (
@@ -6,6 +7,7 @@ from app.agents.graph.schemas import (
     VerificationResult,
 )
 from app.mcp.repository_resolver import RepositoryResolver
+from app.core.logging import get_logger, log_agent_event
 from app.services.command_runner import CommandKind, CommandRunner
 
 
@@ -21,6 +23,7 @@ _FRONTEND_EXTENSIONS = {
     ".vue",
     ".svelte",
 }
+logger = get_logger("verification")
 
 
 class VerificationService:
@@ -43,6 +46,34 @@ class VerificationService:
         changed_files: list[str],
         instruction: str,
     ) -> VerificationResult:
+        started = time.perf_counter()
+
+        def completed(result: VerificationResult) -> VerificationResult:
+            last_exit_code = (
+                result.checks[-1].exit_code
+                if result.checks
+                else None
+            )
+            log_agent_event(
+                logger,
+                "verification.completed",
+                user_id=user_id,
+                repository_id=repository_id,
+                duration_ms=int(
+                    (time.perf_counter() - started) * 1000
+                ),
+                success=result.success,
+                error_type=(
+                    None
+                    if result.success
+                    else "VerificationFailure"
+                ),
+                command_exit_code=last_exit_code,
+                verification_success=result.success,
+                check_count=len(result.checks),
+            )
+            return result
+
         resolved = self.repository_resolver.resolve_owned_workspace(
             repository_id,
             user_id,
@@ -57,7 +88,7 @@ class VerificationService:
             path.suffix.lower() in _DOCUMENT_EXTENSIONS
             for path in normalized_files
         ):
-            return VerificationResult(
+            return completed(VerificationResult(
                 success=True,
                 checks=[
                     VerificationCheck(
@@ -68,14 +99,14 @@ class VerificationService:
                         duration_ms=0,
                     )
                 ],
-            )
+            ))
 
         command_kinds = self._select_checks(
             workspace,
             normalized_files,
         )
         if not command_kinds:
-            return VerificationResult(
+            return completed(VerificationResult(
                 success=False,
                 checks=[
                     VerificationCheck(
@@ -91,7 +122,7 @@ class VerificationService:
                 failure_summary=(
                     "No applicable verification checks."
                 ),
-            )
+            ))
 
         checks: list[VerificationCheck] = []
         failure_lines: list[str] = []
@@ -144,11 +175,11 @@ class VerificationService:
         failure_summary = None
         if not success:
             failure_summary = "\n".join(failure_lines)[-4000:]
-        return VerificationResult(
+        return completed(VerificationResult(
             success=success,
             checks=checks,
             failure_summary=failure_summary,
-        )
+        ))
 
     @classmethod
     def _select_checks(

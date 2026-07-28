@@ -1,11 +1,13 @@
 import logging
+import time
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from app.core.logging import get_logger, log_agent_event
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger("planner")
 
 
 class PlanStep(BaseModel):
@@ -45,6 +47,13 @@ async def generate_orchestrator_plan(
     *,
     max_attempts: int = 2,
 ) -> OrchestratorPlan:
+    started = time.perf_counter()
+    log_agent_event(
+        logger,
+        "planner.started",
+        agent_code="orchestrator",
+        success=None,
+    )
     messages = [
         SystemMessage(
             content=(
@@ -61,8 +70,29 @@ async def generate_orchestrator_plan(
         try:
             result = await structured_llm.ainvoke(messages)
             if isinstance(result, OrchestratorPlan):
+                log_agent_event(
+                    logger,
+                    "planner.completed",
+                    agent_code="orchestrator",
+                    duration_ms=int(
+                        (time.perf_counter() - started) * 1000
+                    ),
+                    success=True,
+                    step_count=len(result.steps),
+                )
                 return result
-            return OrchestratorPlan.model_validate(result)
+            validated = OrchestratorPlan.model_validate(result)
+            log_agent_event(
+                logger,
+                "planner.completed",
+                agent_code="orchestrator",
+                duration_ms=int(
+                    (time.perf_counter() - started) * 1000
+                ),
+                success=True,
+                step_count=len(validated.steps),
+            )
+            return validated
         except Exception as exc:
             validation_errors = (
                 exc.errors(include_input=False)
@@ -77,7 +107,7 @@ async def generate_orchestrator_plan(
                 validation_errors,
             )
 
-    return OrchestratorPlan(
+    fallback = OrchestratorPlan(
         steps=[
             PlanStep(
                 agent="backend",
@@ -85,3 +115,13 @@ async def generate_orchestrator_plan(
             )
         ]
     )
+    log_agent_event(
+        logger,
+        "planner.fallback",
+        agent_code="orchestrator",
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        success=True,
+        fallback_reason="structured_output_failed",
+        step_count=1,
+    )
+    return fallback

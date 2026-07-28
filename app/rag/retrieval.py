@@ -1,4 +1,5 @@
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
+from app.core.logging import get_logger, log_agent_event
 from app.mcp.repository_resolver import RepositoryResolver
 from app.models.code_chunk import CodeChunk
 from app.rag.embeddings import (
@@ -15,6 +17,9 @@ from app.rag.embeddings import (
     create_embedding_provider,
 )
 from app.services.workspace_service import workspace_service
+
+
+logger = get_logger("rag.search")
 
 
 class RetrievedCodeChunk(BaseModel):
@@ -85,6 +90,7 @@ class HybridCodeRetriever:
         query: str,
         top_k: int = 8,
     ) -> list[RetrievedCodeChunk]:
+        started = time.perf_counter()
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query must not be empty")
@@ -109,7 +115,19 @@ class HybridCodeRetriever:
             keyword_candidates,
             vector_candidates,
         )
-        return self._apply_budgets(fused, top_k)
+        results = self._apply_budgets(fused, top_k)
+        log_agent_event(
+            logger,
+            "rag.search_completed",
+            user_id=user_id,
+            repository_id=repository_id,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            success=True,
+            retrieval_chunks=len(results),
+            keyword_candidates=len(keyword_candidates),
+            vector_candidates=len(vector_candidates),
+        )
+        return results
 
     def _keyword_candidates(
         self,

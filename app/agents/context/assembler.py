@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from app.agents.context.models import (
 )
 from app.agents.context.token_budget import TokenEstimator
 from app.core.config import Settings, settings
+from app.core.logging import get_logger, log_agent_event
 from app.db.session import SessionLocal
 from app.mcp.repository_resolver import RepositoryResolver
 from app.models.message import Message
@@ -51,6 +53,7 @@ _IGNORED_DIRECTORIES = {
     "dist",
     "node_modules",
 }
+logger = get_logger("context")
 
 
 class ContextAssembler:
@@ -85,6 +88,7 @@ class ContextAssembler:
         previous_results: list[dict],
         previous_errors: list[str],
     ) -> AssembledAgentContext:
+        started = time.perf_counter()
         raw_blocks = [
             self._block(
                 ContextSource.SYSTEM,
@@ -154,7 +158,7 @@ class ContextAssembler:
 
         blocks, truncated = self._apply_budget(raw_blocks)
         messages = self._to_messages(blocks)
-        return AssembledAgentContext(
+        assembled = AssembledAgentContext(
             blocks=blocks,
             messages=messages,
             estimated_tokens=sum(
@@ -162,6 +166,22 @@ class ContextAssembler:
             ),
             truncated_blocks=truncated,
         )
+        log_agent_event(
+            logger,
+            "context.assembled",
+            conversation_id=conversation_id,
+            user_id=user_id,
+            repository_id=repository_id,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            success=True,
+            context_tokens=assembled.estimated_tokens,
+            retrieval_chunks=sum(
+                block.source == ContextSource.RETRIEVAL
+                for block in blocks
+            ),
+            truncated_blocks=len(truncated),
+        )
+        return assembled
 
     def _safe_system_prompt(self, system_prompt: str) -> str:
         content = (

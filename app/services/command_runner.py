@@ -11,6 +11,10 @@ from enum import Enum
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.logging import get_logger, log_agent_event
+
+
+logger = get_logger("command")
 
 
 class CommandKind(str, Enum):
@@ -91,6 +95,12 @@ class CommandRunner:
         target: str | None = None,
     ) -> CommandExecutionResult:
         started = time.perf_counter()
+        log_agent_event(
+            logger,
+            "command.started",
+            tool_name=command_kind.value,
+            success=None,
+        )
         workspace = Path(workspace_path).resolve()
         if not workspace.is_dir():
             raise CommandValidationError(
@@ -159,7 +169,7 @@ class CommandRunner:
         stderr, stderr_truncated = self._truncate(stderr or "")
         exit_code = process.returncode
         duration_ms = int((time.perf_counter() - started) * 1000)
-        return CommandExecutionResult(
+        result = CommandExecutionResult(
             command_kind=command_kind,
             argv=argv,
             exit_code=exit_code,
@@ -170,6 +180,8 @@ class CommandRunner:
             truncated=stdout_truncated or stderr_truncated,
             success=not timed_out and exit_code == 0,
         )
+        self._log_completed(result)
+        return result
 
     @staticmethod
     def _validate_target(target: str | None) -> str | None:
@@ -315,7 +327,7 @@ class CommandRunner:
         message: str,
         started: float,
     ) -> CommandExecutionResult:
-        return CommandExecutionResult(
+        result = CommandExecutionResult(
             command_kind=command_kind,
             argv=argv,
             exit_code=None,
@@ -325,6 +337,24 @@ class CommandRunner:
             timed_out=False,
             truncated=False,
             success=False,
+        )
+        self._log_completed(result)
+        return result
+
+    @staticmethod
+    def _log_completed(result: CommandExecutionResult) -> None:
+        log_agent_event(
+            logger,
+            "command.completed",
+            tool_name=result.command_kind.value,
+            duration_ms=result.duration_ms,
+            success=result.success,
+            error_type=(
+                None if result.success else "CommandExecutionError"
+            ),
+            command_exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            truncated=result.truncated,
         )
 
     @staticmethod

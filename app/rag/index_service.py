@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.logging import get_logger, log_agent_event
 from app.db.session import SessionLocal
 from app.mcp.repository_resolver import RepositoryResolver
 from app.models.code_chunk import CodeChunk
@@ -41,6 +43,7 @@ _IGNORED_DIRECTORIES = {
     "dist",
     "node_modules",
 }
+logger = get_logger("rag.index")
 
 
 class RepositoryIndexService:
@@ -69,12 +72,9 @@ class RepositoryIndexService:
         self,
         repository_id: int,
     ) -> IndexSummary:
-        workspace = self._resolve_workspace(repository_id)
-        file_paths = self._list_files(workspace)
-        return await self._update(
+        return await self._logged_update(
             repository_id=repository_id,
-            workspace=workspace,
-            file_paths=file_paths,
+            file_paths=None,
             full_index=True,
         )
 
@@ -83,7 +83,6 @@ class RepositoryIndexService:
         repository_id: int,
         file_paths: list[str],
     ) -> IndexSummary:
-        workspace = self._resolve_workspace(repository_id)
         normalized = list(
             dict.fromkeys(
                 path.replace("\\", "/").lstrip("/")
@@ -91,12 +90,66 @@ class RepositoryIndexService:
                 if path
             )
         )
-        return await self._update(
+        return await self._logged_update(
             repository_id=repository_id,
-            workspace=workspace,
             file_paths=normalized,
             full_index=False,
         )
+
+    async def _logged_update(
+        self,
+        *,
+        repository_id: int,
+        file_paths: list[str] | None,
+        full_index: bool,
+    ) -> IndexSummary:
+        started = time.perf_counter()
+        mode = "full" if full_index else "incremental"
+        log_agent_event(
+            logger,
+            "rag.index_started",
+            repository_id=repository_id,
+            success=None,
+            index_mode=mode,
+        )
+        try:
+            workspace = self._resolve_workspace(repository_id)
+            selected_files = (
+                self._list_files(workspace)
+                if file_paths is None
+                else file_paths
+            )
+            summary = await self._update(
+                repository_id=repository_id,
+                workspace=workspace,
+                file_paths=selected_files,
+                full_index=full_index,
+            )
+        except Exception as exc:
+            log_agent_event(
+                logger,
+                "rag.index_completed",
+                repository_id=repository_id,
+                duration_ms=int(
+                    (time.perf_counter() - started) * 1000
+                ),
+                success=False,
+                error_type=type(exc).__name__,
+                index_mode=mode,
+            )
+            raise
+        log_agent_event(
+            logger,
+            "rag.index_completed",
+            repository_id=repository_id,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            success=True,
+            index_mode=mode,
+            files_indexed=summary.files_indexed,
+            chunks_written=summary.chunks_written,
+            chunks_deleted=summary.chunks_deleted,
+        )
+        return summary
 
     def delete_file_chunks(
         self,

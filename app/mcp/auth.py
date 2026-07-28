@@ -1,7 +1,11 @@
 import hmac
+from app.core.logging import get_logger, log_agent_event
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+
+logger = get_logger("mcp.auth")
 
 
 class InternalBearerAuthMiddleware:
@@ -41,6 +45,12 @@ class InternalBearerAuthMiddleware:
             self.token,
         )
         if not authorized:
+            log_agent_event(
+                logger,
+                "mcp.auth_rejected",
+                success=False,
+                error_type="Unauthorized",
+            )
             response = JSONResponse(
                 {"error": "Unauthorized"},
                 status_code=401,

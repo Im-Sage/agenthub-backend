@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.agents.graph.schemas import OrchestratorPlan, PlanStep
 from app.core.config import PROJECT_ROOT
+from app.core.logging import get_logger, log_agent_event
 from app.models.repository import Repository
 from app.models.user import Base, User
 from app.mcp.repository_resolver import RepositoryResolver
@@ -28,6 +29,7 @@ from evals.report import write_report
 
 
 CASES_ROOT = Path(__file__).resolve().parent / "cases"
+logger = get_logger("eval")
 
 
 class FakeStructuredPlanner:
@@ -333,6 +335,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     report = asyncio.run(run_evaluation(args.mode))
+    log_agent_event(
+        logger,
+        "eval.completed",
+        success=report["gate_passed"],
+        error_type=(
+            None if report["gate_passed"] else "EvaluationGateFailure"
+        ),
+        eval_mode=args.mode,
+        failed_cases=len(report.get("failed_cases", [])),
+    )
     json_path, markdown_path = write_report(report, args.output)
     print(f"JSON report: {json_path}")
     print(f"Markdown report: {markdown_path}")
