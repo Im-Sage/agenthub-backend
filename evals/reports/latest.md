@@ -37,4 +37,4 @@
 - Type: `retrieval`
 - Reason: expected_path_not_in_top_5
 - Expected: ["app/agents/tool_calling.py"]
-- Actual: ["evals/cases/retrieval_cases.jsonl", "tests/test_agent_evaluation.py", "agenthub_native_tool_calling_codex_plan.md", "tests/test_verification_service.py", "agenthub_mcp_refactor_plan.md"]
+- Actual: ["docs/agent-security-model.md", "evals/cases/retrieval_cases.jsonl", "tests/test_agent_evaluation.py", "agenthub_native_tool_calling_codex_plan.md", "README.md"]

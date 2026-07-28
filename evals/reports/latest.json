@@ -51,11 +51,11 @@
         "app/agents/tool_calling.py"
       ],
       "actual": [
+        "docs/agent-security-model.md",
         "evals/cases/retrieval_cases.jsonl",
         "tests/test_agent_evaluation.py",
         "agenthub_native_tool_calling_codex_plan.md",
-        "tests/test_verification_service.py",
-        "agenthub_mcp_refactor_plan.md"
+        "README.md"
       ]
     }
   ],
