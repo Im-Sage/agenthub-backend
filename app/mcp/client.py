@@ -24,6 +24,10 @@ class MCPToolClient:
             return self._tool_result_to_dict(result)
 
     async def _open_session(self):
+        if not self.token:
+            raise MCPClientError(
+                "MCP internal token is not configured."
+            )
         try:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client

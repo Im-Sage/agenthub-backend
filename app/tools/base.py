@@ -20,6 +20,7 @@ class ToolCallRequest(BaseModel):
     task_id: int | None = None
     conversation_id: int | None = None
     user_id: int | None = None
+    repository_id: int | None = None
     require_confirmation: bool = False
 
 

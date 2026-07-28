@@ -16,6 +16,8 @@ class AgentRunRequest(BaseModel):
     conversation_id: int
     instruction: str
     repo_path: str | None = None
+    repository_id: int | None = None
+    user_id: int | None = None
     branch_name: str | None = None
     target_files: list[str] = Field(default_factory=list)
     context: dict = Field(default_factory=dict)

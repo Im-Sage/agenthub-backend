@@ -109,11 +109,15 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
         from app.models.conversation import Conversation
         
         repo_path = None
+        repository_id = None
+        user_id = None
         conversation = db.get(Conversation, task.conversation_id)
         if conversation and conversation.repository_id:
             repo = db.get(Repository, conversation.repository_id)
             if repo:
                 repo_path = repo.local_path
+                repository_id = repo.id
+                user_id = repo.user_id
                 # 准备工作区分支并清理历史干扰 (Phase 10 鲁棒性增强)
                 sync_run_async(workspace_service.prepare_branch(
                     repo_path, repo.default_branch, f"agent-task-{task.id}", task=task
@@ -127,6 +131,8 @@ def run_agent_task(task_id: int, create_reply_message: bool = True):
                     conversation_id=task.conversation_id,
                     instruction=task.instruction,
                     repo_path=repo_path,
+                    repository_id=repository_id,
+                    user_id=user_id,
                     context={"system_prompt": agent.system_prompt or ""},
                     task=task
                 )
@@ -235,11 +241,15 @@ def run_orchestrator_task(parent_task_id: int):
         
         # 获取工作空间上下文
         repo_path = None
+        repository_id = None
+        user_id = None
         conversation = db.get(Conversation, parent_task.conversation_id)
         if conversation and conversation.repository_id:
             repo = db.get(Repository, conversation.repository_id)
             if repo:
                 repo_path = repo.local_path
+                repository_id = repo.id
+                user_id = repo.user_id
 
         # 运行异步适配器并等待结果
         run_result = sync_run_async(
@@ -249,6 +259,8 @@ def run_orchestrator_task(parent_task_id: int):
                     conversation_id=parent_task.conversation_id,
                     instruction=parent_task.instruction,
                     repo_path=repo_path,
+                    repository_id=repository_id,
+                    user_id=user_id,
                     context={"system_prompt": agent.system_prompt or ""},
                     task=parent_task
                 )

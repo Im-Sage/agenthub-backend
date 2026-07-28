@@ -89,12 +89,31 @@ class ToolRegistry:
                 success=False,
                 error="MCP tool mode is enabled, but mcp_workspace_server_url is not configured.",
             )
+        if not settings.mcp_internal_token:
+            return ToolCallResult(
+                success=False,
+                error="MCP tool mode is enabled, but mcp_internal_token is not configured.",
+            )
+        if request.repository_id is None or request.user_id is None:
+            return ToolCallResult(
+                success=False,
+                error="MCP workspace tools require trusted repository_id and user_id.",
+            )
 
         client = MCPToolClient(settings.mcp_workspace_server_url, token=settings.mcp_internal_token)
         mcp_name = self._to_mcp_tool_name(request.name)
+        arguments = {
+            key: value
+            for key, value in request.arguments.items()
+            if key not in {"local_path", "repository_id", "user_id"}
+        }
+        arguments.update(
+            repository_id=request.repository_id,
+            user_id=request.user_id,
+        )
 
         try:
-            result = await client.call_tool(mcp_name, request.arguments)
+            result = await client.call_tool(mcp_name, arguments)
         except Exception as exc:
             return ToolCallResult(success=False, error=f"MCP tool call failed: {exc}")
 

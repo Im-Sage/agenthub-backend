@@ -81,13 +81,18 @@ def _model_input_schema(
     schema.setdefault("type", "object")
 
     properties = dict(schema.get("properties") or {})
-    properties.pop("local_path", None)
+    for trusted_parameter in (
+        "local_path",
+        "repository_id",
+        "user_id",
+    ):
+        properties.pop(trusted_parameter, None)
     schema["properties"] = properties
 
     required = [
         item
         for item in schema.get("required", [])
-        if item != "local_path"
+        if item not in {"local_path", "repository_id", "user_id"}
     ]
 
     if required:
@@ -179,6 +184,8 @@ async def run_tool_calling_agent(
     messages: list[BaseMessage],
     agent_code: str,
     repo_path: str | None,
+    repository_id: int | None = None,
+    user_id: int | None = None,
     task_id: int | None,
     conversation_id: int | None,
     legacy_fallback: bool | None = None,
@@ -194,7 +201,10 @@ async def run_tool_calling_agent(
     # build_model_tools 函数根据智能体代码和工作区关联状态，构建模型可调用的工具列表和工具名称映射。
     model_tools, reverse_map = build_model_tools(
         agent_code,
-        has_workspace=bool(repo_path),
+        has_workspace=bool(
+            repo_path
+            or (repository_id is not None and user_id is not None)
+        ),
     )
     # bind_tools 方法将工具绑定到语言模型（llm）上，使得模型可以调用这些工具。
     # 它会将工具的定义传递给模型，使模型在生成响应时能够识别和调用这些工具。
@@ -271,9 +281,18 @@ async def run_tool_calling_agent(
                 continue
             # arguments 字典用于存储工具调用的参数，从模型请求中获取 "args" 字段，如果没有提供参数，则使用空字典。
             arguments = dict(call.get("args") or {})
+            for trusted_parameter in (
+                "local_path",
+                "repository_id",
+                "user_id",
+            ):
+                arguments.pop(trusted_parameter, None)
             # 如果工具名称以 "workspace." 开头，表示这是一个工作区相关的工具调用。在这种情况下，如果没有提供 repo_path，则无法访问工作区，因此会返回一个错误消息，提示工作区不可用。
             if registry_name.startswith("workspace."):
-                if not repo_path:
+                if not (
+                    (repository_id is not None and user_id is not None)
+                    or repo_path
+                ):
                     conversation.append(
                         ToolMessage(
                             content=json.dumps(
@@ -288,7 +307,13 @@ async def run_tool_calling_agent(
                     )
                     continue
 
-                arguments["local_path"] = repo_path
+                if (
+                    repository_id is None
+                    and user_id is None
+                    and repo_path
+                    and not settings.mcp_enabled
+                ):
+                    arguments["local_path"] = repo_path
 
             # 这里调用 tool_registry.call 方法来执行工具调用请求。
             # 它会将工具名称、任务ID、会话ID和参数传递给工具注册表，以便实际执行工具的逻辑。
@@ -297,6 +322,8 @@ async def run_tool_calling_agent(
                     name=registry_name,
                     task_id=task_id,
                     conversation_id=conversation_id,
+                    repository_id=repository_id,
+                    user_id=user_id,
                     arguments=arguments,
                     require_confirmation=False,
                 )

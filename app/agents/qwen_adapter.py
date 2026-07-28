@@ -59,6 +59,8 @@ class QwenAgentAdapter(AgentAdapter):
             messages=messages,
             agent_code=agent_code,
             repo_path=request.repo_path,
+            repository_id=request.repository_id,
+            user_id=request.user_id,
             task_id=request.task_id,
             conversation_id=request.conversation_id,
         )

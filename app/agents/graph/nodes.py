@@ -173,6 +173,8 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
                 conversation_id=state["conversation_id"],
                 instruction=instruction,
                 repo_path=repo_path,
+                repository_id=state.get("repository_id"),
+                user_id=state.get("user_id"),
                 context=context,
                 task=child_task,
             )

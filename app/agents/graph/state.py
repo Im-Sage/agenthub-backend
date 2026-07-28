@@ -11,6 +11,8 @@ class AgentState(TypedDict):
     task_id: int
     conversation_id: int
     repo_path: str | None
+    repository_id: int | None
+    user_id: int | None
     
     # 任务计划 (Orchestrator 生成)
     plan: List[Dict[str, Any]]

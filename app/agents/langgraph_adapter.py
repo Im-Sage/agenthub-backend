@@ -13,6 +13,8 @@ class LangGraphOrchestratorAdapter(AgentAdapter):
             "task_id": request.task_id,
             "conversation_id": request.conversation_id,
             "repo_path": request.repo_path,
+            "repository_id": request.repository_id,
+            "user_id": request.user_id,
             "plan": [],
             "current_step_index": 0,
             "current_agent": None,
