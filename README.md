@@ -566,3 +566,19 @@ git status
 - PR 状态目前创建时保存，后续可以增加 GitHub 状态同步。
 - 本地预览构建直接在 workspace 执行，生产环境建议改成容器隔离构建。
 - 内存限流适合单进程开发环境，多实例部署应改成 Redis 限流。
+
+## Agent evaluation
+
+Run the deterministic offline evaluation gate without external API keys:
+
+```powershell
+python -m evals.run --mode offline --output evals/reports/latest.json
+```
+
+The command also writes `evals/reports/latest.md` and exits with status 1 when
+the planner, retrieval, context, tool, or verification smoke thresholds fail.
+Live evaluation is optional and is skipped cleanly when no API key is configured:
+
+```powershell
+python -m evals.run --mode live --output evals/reports/live.json
+```
