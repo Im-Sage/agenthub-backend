@@ -406,8 +406,22 @@ async def test_qwen_adapter_passes_trusted_repository_identity(monkeypatch):
         captured.update(kwargs)
         return ToolCallingRunResult(summary="done")
 
+    class FakeContextAssembler:
+        async def assemble(self, **kwargs):
+            return SimpleNamespace(
+                messages=[],
+                estimated_tokens=0,
+                blocks=[],
+                truncated_blocks=[],
+            )
+
     monkeypatch.setattr(settings, "aliyun_api_key", "test-key")
     monkeypatch.setattr(qwen_adapter, "get_chat_llm", object)
+    monkeypatch.setattr(
+        qwen_adapter,
+        "context_assembler",
+        FakeContextAssembler(),
+    )
     monkeypatch.setattr(
         qwen_adapter,
         "run_tool_calling_agent",

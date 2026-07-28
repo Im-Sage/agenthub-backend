@@ -153,7 +153,30 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
         context = {
             "agent_code": agent_code,
             "system_prompt": system_prompt,
+            "previous_results": list(
+                state.get("execution_results") or []
+            ),
+            "previous_errors": list(state.get("errors") or []),
+            "plan_step_index": current_step_index,
+            "parent_task_id": state["task_id"],
+            "verification_results": list(
+                state.get("verification_results") or []
+            ),
+            "changed_files": [
+                file_path
+                for execution in state.get("execution_results") or []
+                for file_path in execution.get("files") or []
+            ],
         }
+        if agent_code == "reviewer" and repo_path:
+            try:
+                context["git_diff_summary"] = workspace_service.get_diff(
+                    repo_path
+                )[-8_000:]
+            except Exception as exc:
+                context["git_diff_summary"] = (
+                    f"Git diff unavailable: {type(exc).__name__}"
+                )
 
         if state.get("errors"):
             if child_task:

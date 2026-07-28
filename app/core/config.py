@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +47,13 @@ class Settings(BaseSettings):
     embedding_api_key: str | None = None
     embedding_dimensions: int = 256
     rag_chunk_batch_size: int = 32
+    agent_context_max_tokens: int = 24_000
+    agent_context_system_tokens: int = 3_000
+    agent_context_conversation_tokens: int = 4_000
+    agent_context_retrieval_tokens: int = 10_000
+    agent_context_execution_tokens: int = 5_000
+    agent_context_response_reserve_tokens: int = 2_000
+    agent_context_max_retrieval_chunks: int = 8
 
     github_token: str | None = None
     
@@ -56,6 +64,22 @@ class Settings(BaseSettings):
     mcp_internal_token: str | None = None
 
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8")
+
+    @model_validator(mode="after")
+    def validate_context_budgets(self):
+        allocated = (
+            self.agent_context_system_tokens
+            + self.agent_context_conversation_tokens
+            + self.agent_context_retrieval_tokens
+            + self.agent_context_execution_tokens
+            + self.agent_context_response_reserve_tokens
+        )
+        if allocated > self.agent_context_max_tokens:
+            raise ValueError(
+                "Agent context category budgets and response reserve "
+                "must not exceed agent_context_max_tokens"
+            )
+        return self
 
     @property
     def resolved_database_url(self) -> str:

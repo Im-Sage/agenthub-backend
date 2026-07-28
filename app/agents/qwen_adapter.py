@@ -1,13 +1,15 @@
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from app.agents.base import (
     AgentAdapter,
     AgentRunRequest,
     AgentRunResult,
 )
+from app.agents.context import ContextAssembler, ContextSource
 from app.agents.llm_factory import get_chat_llm
 from app.agents.tool_calling import run_tool_calling_agent
 from app.core.config import settings
+
+
+context_assembler = ContextAssembler()
 
 
 class QwenAgentAdapter(AgentAdapter):
@@ -36,27 +38,42 @@ class QwenAgentAdapter(AgentAdapter):
                 "markers for normal workspace operations."
             )
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=request.instruction),
-        ]
-
-        previous_error = request.context.get("previous_error")
-        if previous_error:
-            messages.append(
-                HumanMessage(
-                    content=(
-                        "Previous execution failed with this error:\n"
-                        f"{previous_error}\n"
-                        "Inspect the current workspace and fix it."
-                    )
-                )
+        previous_results = list(
+            request.context.get("previous_results") or []
+        )
+        supplemental_result = {
+            key: request.context[key]
+            for key in (
+                "changed_files",
+                "git_diff_summary",
+                "verification_results",
+                "plan_step_index",
+                "parent_task_id",
             )
+            if request.context.get(key) not in (None, [], "")
+        }
+        if supplemental_result:
+            previous_results.append(supplemental_result)
+        previous_errors = list(
+            request.context.get("previous_errors") or []
+        )
+        previous_error = request.context.get("previous_error")
+        if previous_error and previous_error not in previous_errors:
+            previous_errors.append(previous_error)
+        assembled = await context_assembler.assemble(
+            system_prompt=system_prompt,
+            instruction=request.instruction,
+            conversation_id=request.conversation_id,
+            repository_id=request.repository_id,
+            user_id=request.user_id,
+            previous_results=previous_results,
+            previous_errors=previous_errors,
+        )
 
         # 调用 run_tool_calling_agent 来执行智能体的操作
         result = await run_tool_calling_agent(
             llm=get_chat_llm(),
-            messages=messages,
+            messages=assembled.messages,
             agent_code=agent_code,
             repo_path=request.repo_path,
             repository_id=request.repository_id,
@@ -73,6 +90,9 @@ class QwenAgentAdapter(AgentAdapter):
                 f"provider=aliyun "
                 f"model={settings.aliyun_model} "
                 f"files_changed={len(result.changed_files)} "
-                f"legacy_fallback={result.used_legacy_fallback}"
+                f"legacy_fallback={result.used_legacy_fallback} "
+                f"context_tokens={assembled.estimated_tokens} "
+                f"retrieval_chunks={sum(block.source == ContextSource.RETRIEVAL for block in assembled.blocks)} "
+                f"truncated_blocks={len(assembled.truncated_blocks)}"
             ),
         )
