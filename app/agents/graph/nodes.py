@@ -1,43 +1,17 @@
 import json
-import re
 from datetime import datetime
 from typing import Any, Dict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
 from app.agents.base import AgentRunRequest
+from app.agents.graph.schemas import generate_orchestrator_plan
 from app.agents.graph.state import AgentState
 from app.agents.llm_factory import get_chat_llm
 from app.db.session import SessionLocal
 from app.models.task import Task
 from app.schemas.enums import MessageType, SenderType, TaskStatus
-
-
-def _extract_plan(content: str) -> list[dict[str, str]]:
-    try:
-        match = re.search(r"\[[\s\S]*\]", content)
-        raw_plan = json.loads(match.group()) if match else []
-    except Exception:
-        raw_plan = []
-
-    plan: list[dict[str, str]] = []
-    for step in raw_plan:
-        if not isinstance(step, dict):
-            continue
-        agent = str(step.get("agent") or "backend").strip()
-        instruction = str(step.get("instruction") or "").strip()
-        if not instruction:
-            continue
-        if agent not in {"backend", "frontend", "reviewer"}:
-            agent = "backend"
-        plan.append({"agent": agent, "instruction": instruction})
-
-    if plan:
-        return plan
-
-    return [{"agent": "backend", "instruction": content.strip() or "Handle the user request."}]
-
 
 def _child_ids_from_state(state: AgentState) -> list[int]:
     try:
@@ -52,19 +26,12 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
     from app.services import task_service
 
     llm = get_chat_llm()
-    messages = [
-        SystemMessage(
-            content=(
-                "You are a software task orchestrator. Split the user goal into a JSON array only. "
-                "Each item must contain agent and instruction. agent must be one of backend, "
-                "frontend, reviewer. Do not include Markdown or explanatory text."
-            )
-        ),
-        HumanMessage(content=f"User goal: {state['messages'][0].content}"),
+    user_goal = str(state["messages"][0].content)
+    orchestrator_plan = await generate_orchestrator_plan(llm, user_goal)
+    plan = [
+        step.model_dump()
+        for step in orchestrator_plan.steps
     ]
-
-    response = await llm.ainvoke(messages)
-    plan = _extract_plan(str(response.content))
 
     db = SessionLocal()
     child_ids: list[int] = []

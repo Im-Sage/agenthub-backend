@@ -43,9 +43,12 @@ def install_plan_node_fakes(monkeypatch, parent_metadata, generated_plan):
     events = []
 
     class FakeLlm:
+        def with_structured_output(self, schema):
+            return self
+
         async def ainvoke(self, messages):
             llm_calls.append(messages)
-            return SimpleNamespace(content=json.dumps(generated_plan))
+            return {"steps": generated_plan}
 
     def fake_create_subtask(
         db,
