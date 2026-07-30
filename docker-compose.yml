@@ -13,6 +13,24 @@ services:
       - redis_data:/data
     restart: no
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: agenthub-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: agenthub
+      POSTGRES_PASSWORD: agenthub
+      POSTGRES_DB: agenthub_checkpoints
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agenthub -d agenthub_checkpoints"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
   # RabbitMQ - 可作为 Celery 的另一种消息中间件选择
   rabbitmq:
     image: rabbitmq:management
@@ -99,6 +117,7 @@ services:
 
 volumes:
   redis_data:
+  postgres_data:
   rabbitmq_data:
   minio_data:
   mysql_data:
