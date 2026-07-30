@@ -1,10 +1,7 @@
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
+from app.agents.graph.checkpointer import open_checkpointer
 from app.agents.graph.workflow import create_agent_graph
-from app.core.config import settings
 
 def graph_thread_id(task_id: int) -> str:
     """
@@ -28,14 +25,5 @@ def graph_config(task_id: int) -> dict:
 # open_agent_graph 是一个异步上下文管理器，用于创建和管理 LangGraph 的状态图，并提供一个检查点保存器。
 @asynccontextmanager
 async def open_agent_graph():
-    # 确保检查点路径存在，如果不存在则创建父目录
-    checkpoint_path = Path(settings.resolved_langgraph_checkpoint_path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # 使用 AsyncSqliteSaver 从检查点路径创建一个异步 SQLite 保存器，并在上下文中提供创建的状态图
-    # AsyncSqliteSaver是一个异步的SQLite检查点保存器，用于在LangGraph中保存和恢复状态图每一步的执行状态。
-    async with AsyncSqliteSaver.from_conn_string(
-        checkpoint_path.as_posix() # 将 Path 对象转换为字符串路径，正斜杠形式
-    ) as checkpointer:
-        # 返回的不再是单纯的内存 Graph，而是一个会把运行状态写入 SQLite 的 Compiled Graph
+    async with open_checkpointer() as checkpointer:
         yield create_agent_graph(checkpointer=checkpointer)
