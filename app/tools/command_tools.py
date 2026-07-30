@@ -133,7 +133,7 @@ async def workspace_run_tests(
         CommandKind.PYTEST
         if _is_python_workspace(workspace)
         else _package_command(workspace, script="test")
-    )
+    ) # 这是一个三元表达式，如果是 Python 工作区，则使用 PYTEST，否则尝试获取 package.json 中的测试命令
     if command_kind is None:
         return _not_applicable(
             "No supported test configuration is available"

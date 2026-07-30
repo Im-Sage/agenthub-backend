@@ -99,6 +99,8 @@ def _model_input_schema(
     schema.setdefault("type", "object")
 
     properties = dict(schema.get("properties") or {})
+
+    # 这些参数来自服务端可信调用上下文，不能由模型查看或覆盖。
     for trusted_parameter in (
         "local_path",
         "repository_id",
@@ -122,7 +124,7 @@ def _model_input_schema(
 
 
 """
-build_model_tools 函数用于根据智能体代码和工作区关联状态，构建模型可调用的工具列表和工具名称映射。
+build_model_tools 函数用于根据 Agent 角色筛选工具。
 参数说明：
 - agent_code: 智能体代码，用于确定允许调用的工具集合。
 - has_workspace: 布尔值，表示是否关联了可信的工作区。如果为 False，则不允许调用任何工作区相关的工具。
@@ -232,15 +234,17 @@ async def run_tool_calling_agent(
     conversation = list(messages)
     changed_files: list[str] = []
 
-    #
+
     for _ in range(round_limit):
         # ainvoke 方法是一个异步调用，用于向模型发送当前的对话消息（conversation），并获取模型的响应。
         # 这里的模型响应可能包含工具调用请求（tool_calls），也可能只是普通的文本响应。
+        # response是模型建议调用的工具列表，每个工具调用包含工具名称、参数等信息。模型可能会在响应中建议调用一个或多个工具，以便执行特定的操作。
         response = await model.ainvoke(conversation)
         conversation.append(response)
 
         # getattr(response, "tool_calls", []) or [] 获取模型响应中的工具调用请求（tool_calls）。
         # 如果模型响应中没有工具调用请求，则返回一个空列表。这样可以确保在后续处理中，即使没有工具调用请求，也不会引发错误。
+        # tool_calls是模型 建议 调用的工具列表，每个工具调用包含工具名称、参数等信息。模型可能会在响应中建议调用一个或多个工具，以便执行特定的操作。
         tool_calls = list(
             getattr(response, "tool_calls", []) or []
         )
@@ -268,16 +272,17 @@ async def run_tool_calling_agent(
                     messages=conversation,
                     used_legacy_fallback=True,
                 )
-
+            # 如果模型响应中没有工具调用请求，并且不需要使用旧的文件操作回退机制，则直接返回一个 ToolCallingRunResult 对象，
+            # 其中包含对话摘要、变更文件列表、对话消息以及是否使用了旧的文件操作回退机制（此处为 False）。
             return ToolCallingRunResult(
                 summary=content,
                 changed_files=list(dict.fromkeys(changed_files)),
                 messages=conversation,
                 used_legacy_fallback=False,
             )
-        # tool_calls 列表中包含了模型请求调用的工具信息，每个工具调用信息是一个字典，包含工具的名称、参数等。
+        # tool_calls 列表中包含了所有模型建议调用的工具，每个工具调用包含工具名称、参数等信息。
         for call in tool_calls:
-            call_id = str(call.get("id") or "")
+            call_id = str(call.get("id") or "") # 工具调用的唯一标识
             external_name = str(call.get("name") or "")
             registry_name = reverse_map.get(external_name)
             # 如果模型请求调用的工具名称在 reverse_map 中找不到对应的注册表名称，则说明该工具是未知的或不允许调用的。
@@ -354,7 +359,7 @@ async def run_tool_calling_agent(
                 )
                 if isinstance(files, list):
                     changed_files.extend(str(path) for path in files)
-
+            # 每一轮工具调用的结果都会被封装成一个 ToolMessage 对象，并附加到 conversation 列表中，以便在后续的对话中可以参考这些结果。
             conversation.append(
                 ToolMessage(
                     content=json.dumps(

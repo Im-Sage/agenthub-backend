@@ -46,6 +46,15 @@ _IGNORED_DIRECTORIES = {
 logger = get_logger("rag.index")
 
 
+"""
+RepositoryIndexService 是一个用于索引和更新代码仓库中文件的服务类。它提供了以下主要功能：
+1. index_repository: 对整个仓库进行完整索引。
+    index_repository 方法会遍历仓库中的所有文件，分块处理文件内容，并生成嵌入向量以便后续的检索和分析。
+    它还会记录索引操作的日志，包括成功与否、索引模式、处理的文件数量等信息。
+2. update_files: 对指定文件进行增量更新索引。
+    update_files 方法会对指定的文件路径进行索引更新，分块处理文件内容，并生成嵌入向量以便后续的检索和分析。
+该服务会将文件内容分块，并生成嵌入向量以便后续的检索和分析。它还会记录索引操作的日志，包括成功与否、索引模式、处理的文件数量等信息。
+"""
 class RepositoryIndexService:
     def __init__(
         self,
@@ -67,7 +76,6 @@ class RepositoryIndexService:
         self.batch_size = batch_size or settings.rag_chunk_batch_size
         if self.batch_size < 1:
             raise ValueError("batch_size must be positive")
-
     async def index_repository(
         self,
         repository_id: int,
@@ -203,7 +211,9 @@ class RepositoryIndexService:
                     continue
                 files.append(path.relative_to(workspace).as_posix())
         return sorted(files)
-
+    # _update 方法是 RepositoryIndexService 类的核心方法，用于处理代码仓库中文件的索引更新。
+    # 它会遍历指定的文件路径，读取文件内容，进行分块处理，并生成嵌入向量以便后续的检索和分析。
+    # 该方法还会与数据库交互，删除旧的索引数据并写入新的索引数据，同时返回一个 IndexSummary 对象，包含索引操作的统计信息。
     async def _update(
         self,
         *,

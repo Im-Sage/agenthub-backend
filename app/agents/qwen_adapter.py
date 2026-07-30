@@ -60,6 +60,7 @@ class QwenAgentAdapter(AgentAdapter):
         previous_error = request.context.get("previous_error")
         if previous_error and previous_error not in previous_errors:
             previous_errors.append(previous_error)
+        # 调用 context_assembler 来组装上下文信息，包括系统提示、指令、对话 ID、仓库 ID、用户 ID，以及之前的结果和错误信息
         assembled = await context_assembler.assemble(
             system_prompt=system_prompt,
             instruction=request.instruction,

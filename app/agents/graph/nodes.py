@@ -40,6 +40,7 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
         parent_task = db.get(Task, state["task_id"])
         if parent_task:
             for step in plan:
+                #  Planner 创建子任务时，只写入数据库，没有调用 Celery 执行，子任务的执行由 execute_node() 负责
                 child_task = task_service.create_subtask(
                     db,
                     parent_task,

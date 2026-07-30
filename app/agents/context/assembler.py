@@ -55,7 +55,11 @@ _IGNORED_DIRECTORIES = {
 }
 logger = get_logger("context")
 
-
+"""
+ContextAssembler 是一个用于组装和管理上下文信息的类，
+主要用于构建与用户请求相关的上下文数据，以便在对话或任务执行中使用。
+它从多个来源收集信息，包括系统提示、用户指令、代码仓库内容、检索结果、历史对话记录以及之前的执行结果和错误信息。
+"""
 class ContextAssembler:
     def __init__(
         self,
@@ -120,6 +124,7 @@ class ContextAssembler:
                         priority=50,
                     )
                 )
+            # 检索相关代码块
             retrieval_results = await self.retriever.search(
                 repository_id=repository_id,
                 user_id=user_id,
@@ -387,7 +392,7 @@ class ContextAssembler:
                 )
             )
         return blocks
-
+    # _block 方法用于创建一个 ContextBlock 对象，封装了上下文块的来源、内容、优先级、估计的 token 数量以及可选的元数据。
     def _block(
         self,
         source: ContextSource,

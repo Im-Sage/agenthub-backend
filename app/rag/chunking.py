@@ -41,6 +41,13 @@ _LOCK_FILES = {
 _MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 
 
+"""
+WorkspaceChunker用于将工作区中的文件内容分割成多个代码块，以便进行处理和分析。
+它支持多种编程语言和文件类型，并提供了灵活的分块策略，包括按行数分块、重叠行数以及最大文件大小限制。
+对于Python文件，它还会解析抽象语法树（AST）以识别函数、类和模块文档字符串，从而生成更有意义的代码块。
+对于Markdown文件，它会根据标题进行分块，以便更好地组织内容。
+
+"""
 class WorkspaceChunker:
     def __init__(
         self,
