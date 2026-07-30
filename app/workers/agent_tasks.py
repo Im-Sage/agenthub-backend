@@ -365,6 +365,19 @@ def resume_orchestrator_task(parent_task_id: int, resume_value: dict):
             adapter.resume(parent_task_id, resume_value) # 这里只是创建了一个协程对象，并没有真正执行，真正执行是在 sync_run_async 中调用 await
         )
 
+        if run_result.status == "dispatched":
+            parent_task = db.get(Task, parent_task_id)
+            if parent_task is not None:
+                parent_task.status = TaskStatus.RUNNING
+                parent_task.finished_at = None
+                db.commit()
+                db.refresh(parent_task)
+                sync_run_async(
+                    task_service.broadcast_task_event(
+                        parent_task,
+                        "task.updated",
+                    )
+                )
         return f"LangGraph Orchestrator resumed: {run_result.summary}"
     except Exception as exc:
         db.rollback()

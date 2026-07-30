@@ -31,6 +31,8 @@ class AgentState(TypedDict):
     # 状态标记
     awaiting_confirmation: bool
     approval_status: str | None
+    execution_dispatched: bool
+    canvas_id: str | None
     is_finished: bool
     final_summary: str | None
     metadata_json: str | None # 用于存储额外元数据，如 child_ids

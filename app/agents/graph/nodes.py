@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
@@ -116,6 +116,90 @@ async def approval_node(state: AgentState) -> Dict[str, Any]:
         "awaiting_confirmation": False,
         "is_finished": not approved,
     }
+
+
+async def dispatch_node(state: AgentState) -> Dict[str, Any]:
+    from app.services import orchestrator_dispatch_service
+
+    result = (
+        orchestrator_dispatch_service.dispatch_orchestrator_execution(
+            state["task_id"]
+        )
+    )
+    if result.get("status") != "dispatched":
+        return {
+            "execution_dispatched": False,
+            "canvas_id": None,
+            "is_finished": True,
+            "errors": [result.get("error") or "Celery dispatch failed"],
+        }
+    return {
+        "execution_dispatched": True,
+        "canvas_id": result.get("canvas_id"),
+        "is_finished": True,
+        "errors": [],
+    }
+
+
+async def reject_plan_node(state: AgentState) -> Dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.services import task_service
+
+    db = SessionLocal()
+    try:
+        parent_task = db.get(Task, state["task_id"])
+        if parent_task is not None:
+            try:
+                metadata = json.loads(parent_task.metadata_json or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            metadata["plan_status"] = "rejected"
+            parent_task.metadata_json = json.dumps(
+                metadata,
+                ensure_ascii=False,
+            )
+            parent_task.status = TaskStatus.CANCELLED
+            parent_task.error_message = "Orchestrator plan rejected by user"
+            parent_task.finished_at = datetime.now(UTC)
+            children = list(
+                db.scalars(
+                    select(Task).where(
+                        Task.parent_task_id == parent_task.id
+                    )
+                )
+            )
+            for child in children:
+                if child.status in (
+                    TaskStatus.PENDING,
+                    TaskStatus.PENDING.value,
+                ):
+                    child.status = TaskStatus.CANCELLED
+                    child.finished_at = datetime.now(UTC)
+            db.commit()
+            await task_service.broadcast_task_event(
+                parent_task,
+                "task.updated",
+            )
+            for child in children:
+                if child.status in (
+                    TaskStatus.CANCELLED,
+                    TaskStatus.CANCELLED.value,
+                ):
+                    await task_service.broadcast_task_event(
+                        child,
+                        "task.updated",
+                    )
+        return {
+            "execution_dispatched": False,
+            "canvas_id": None,
+            "is_finished": True,
+            "errors": [],
+        }
+    finally:
+        db.close()
+
+
 async def execute_node(state: AgentState) -> Dict[str, Any]:
     from app.services import task_service
 
@@ -147,7 +231,7 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
     try:
         if child_task:
             child_task.status = TaskStatus.RUNNING
-            child_task.started_at = datetime.utcnow()
+            child_task.started_at = datetime.now(UTC)
             child_task.finished_at = None
             db.commit()
             await task_service.broadcast_task_event(child_task, "task.updated")
@@ -217,7 +301,7 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
         if child_task:
             child_task.status = TaskStatus.SUCCESS
             child_task.result_summary = result.summary
-            child_task.finished_at = datetime.utcnow()
+            child_task.finished_at = datetime.now(UTC)
             db.commit()
             await task_service.broadcast_task_event(child_task, "task.updated")
 
@@ -236,7 +320,7 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
         if child_task:
             child_task.status = TaskStatus.FAILED
             child_task.error_message = str(exc)
-            child_task.finished_at = datetime.utcnow()
+            child_task.finished_at = datetime.now(UTC)
             db.commit()
             await task_service.broadcast_task_event(child_task, "task.updated")
         return {"errors": [f"Execution error: {exc}"]}
@@ -344,7 +428,7 @@ async def summarize_node(state: AgentState) -> Dict[str, Any]:
                 else None
             )
             parent_task.metadata_json = json.dumps(metadata, ensure_ascii=False)
-            parent_task.finished_at = datetime.utcnow()
+            parent_task.finished_at = datetime.now(UTC)
             db.commit()
             await task_service.broadcast_task_event(parent_task, "task.updated")
 
