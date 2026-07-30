@@ -13,6 +13,7 @@ celery_app = Celery(
     include=[
         "app.workers.agent_tasks",
         "app.workers.index_tasks",
+        "app.workers.orchestrator_tasks",
     ],
 )
 
@@ -32,6 +33,9 @@ celery_app.conf.update(
     #   → 任务执行完成
     #   → 再 ACK
     task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    task_track_started=True,
+    result_expires=86400,
     # 单个 worker 预取任务数
     worker_prefetch_multiplier=1,
     # Soft Time Limit 和 Hard Time Limit 都是 Celery 用来限制单个任务最大执行时间的，但处理方式不同。

@@ -1,0 +1,71 @@
+from dataclasses import asdict
+
+from app.core.config import settings
+from app.services import orchestrator_execution_service as execution_service
+from app.workers.celery_app import celery_app
+
+
+@celery_app.task(
+    name=(
+        "app.workers.orchestrator_tasks."
+        "prepare_orchestrator_execution"
+    )
+)
+def prepare_orchestrator_execution(parent_task_id: int) -> dict:
+    return execution_service.prepare_execution(parent_task_id)
+
+
+@celery_app.task(
+    name="app.workers.orchestrator_tasks.prepare_orchestrator_wave"
+)
+def prepare_orchestrator_wave(
+    parent_task_id: int,
+    wave_index: int,
+) -> dict:
+    return execution_service.prepare_wave(parent_task_id, wave_index)
+
+
+@celery_app.task(
+    bind=True,
+    name="app.workers.orchestrator_tasks.run_orchestrator_step",
+    max_retries=settings.orchestrator_step_max_retries,
+)
+def run_orchestrator_step(self, child_task_id: int) -> dict:
+    outcome = execution_service.execute_step(
+        child_task_id,
+        str(self.request.id),
+    )
+    result = asdict(outcome)
+    result["changed_files"] = list(outcome.changed_files)
+    return result
+
+
+@celery_app.task(
+    name="app.workers.orchestrator_tasks.merge_orchestrator_wave"
+)
+def merge_orchestrator_wave(
+    parent_task_id: int,
+    wave_index: int,
+) -> dict:
+    return execution_service.merge_wave(parent_task_id, wave_index)
+
+
+@celery_app.task(
+    name=(
+        "app.workers.orchestrator_tasks."
+        "finalize_orchestrator_execution"
+    )
+)
+def finalize_orchestrator_execution(parent_task_id: int) -> dict:
+    return execution_service.finalize_execution(parent_task_id)
+
+
+@celery_app.task(
+    name="app.workers.orchestrator_tasks.cleanup_orchestrator_worktrees"
+)
+def cleanup_orchestrator_worktrees(
+    parent_task_id: int,
+    force: bool = False,
+) -> dict:
+    return execution_service.cleanup_worktrees(parent_task_id, force=force)
+

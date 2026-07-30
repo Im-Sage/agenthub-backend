@@ -199,7 +199,10 @@ def execute_step(
                 json.loads(child.verification_result_json or "null"),
                 None,
             )
-        if parent is None or parent.status == TaskStatus.CANCELLED:
+        if parent is None or parent.status in (
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        ):
             child.status = TaskStatus.CANCELLED
             db.commit()
             return StepExecutionOutcome(child.id, "CANCELLED", None, (), None, None)
@@ -440,5 +443,35 @@ def finalize_execution(parent_task_id: int) -> dict:
             parent.error_message = str(exc)
             metadata["plan_status"] = "execution_failed"
             parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
+            db.commit()
+            return {"status": "failed", "error": str(exc)}
+
+
+def cleanup_worktrees(parent_task_id: int, *, force: bool = False) -> dict:
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_task_id)
+        if parent is None:
+            return {"status": "failed", "error": "parent task not found"}
+        if (
+            parent.status in (TaskStatus.FAILED, TaskStatus.CANCELLED)
+            and not force
+        ):
+            return {
+                "status": "preserved",
+                "reason": "terminal diagnostics are retained",
+            }
+        try:
+            repository = _repository(db, parent)
+            children = _children(db, parent.id)
+            with _service(repository) as worktrees:
+                for child in children:
+                    if child.worktree_path:
+                        worktrees.remove_worktree(child.worktree_path)
+                    if child.branch_name:
+                        worktrees.cleanup_step_branch(child.branch_name)
+                worktrees.prune()
+            return {"status": "cleaned"}
+        except Exception as exc:
+            parent.error_message = str(exc)
             db.commit()
             return {"status": "failed", "error": str(exc)}
