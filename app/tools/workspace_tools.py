@@ -1,3 +1,10 @@
+import logging
+
+from app.core.config import settings
+from app.mcp.repository_resolver import (
+    RepositoryResolver,
+    WorkspaceAuthorizationError,
+)
 from app.tools.base import ToolCallRequest, ToolCallResult, ToolDefinition, ToolRiskLevel
 from app.tools.registry import tool_registry
 from app.services.workspace_service import workspace_service, WorkspaceError
@@ -5,13 +12,40 @@ from app.db.session import SessionLocal
 from app.models.task import Task
 
 
-async def workspace_write_file(request: ToolCallRequest) -> ToolCallResult:
+logger = logging.getLogger(__name__)
+repository_resolver = RepositoryResolver()
+
+
+def _resolve_workspace_path(request: ToolCallRequest) -> str:
+    if request.repository_id is not None and request.user_id is not None:
+        return repository_resolver.resolve_owned_workspace(
+            request.repository_id,
+            request.user_id,
+        ).local_path
+
     local_path = request.arguments.get("local_path")
+    if not settings.mcp_enabled and local_path:
+        logger.warning(
+            "Using legacy internal local_path fallback for tool=%s",
+            request.name,
+        )
+        return str(local_path)
+
+    raise WorkspaceAuthorizationError(
+        "Trusted repository_id and user_id are required"
+    )
+
+
+async def workspace_write_file(request: ToolCallRequest) -> ToolCallResult:
     target_file = request.arguments.get("target_file")
     content = request.arguments.get("content", "")
 
-    if not local_path or not target_file:
-        return ToolCallResult(success=False, error="local_path and target_file are required")
+    if not target_file:
+        return ToolCallResult(success=False, error="target_file is required")
+    try:
+        local_path = _resolve_workspace_path(request)
+    except WorkspaceAuthorizationError as exc:
+        return ToolCallResult(success=False, error=str(exc))
 
     db = SessionLocal()
     try:
@@ -29,12 +63,15 @@ async def workspace_write_file(request: ToolCallRequest) -> ToolCallResult:
 
 
 async def workspace_rename_file(request: ToolCallRequest) -> ToolCallResult:
-    local_path = request.arguments.get("local_path")
     source_file = request.arguments.get("source_file")
     target_file = request.arguments.get("target_file")
 
-    if not local_path or not source_file or not target_file:
-        return ToolCallResult(success=False, error="local_path, source_file, and target_file are required")
+    if not source_file or not target_file:
+        return ToolCallResult(success=False, error="source_file and target_file are required")
+    try:
+        local_path = _resolve_workspace_path(request)
+    except WorkspaceAuthorizationError as exc:
+        return ToolCallResult(success=False, error=str(exc))
 
     db = SessionLocal()
     try:
@@ -52,11 +89,14 @@ async def workspace_rename_file(request: ToolCallRequest) -> ToolCallResult:
 
 
 async def workspace_delete_file(request: ToolCallRequest) -> ToolCallResult:
-    local_path = request.arguments.get("local_path")
     target_file = request.arguments.get("target_file")
 
-    if not local_path or not target_file:
-        return ToolCallResult(success=False, error="local_path and target_file are required")
+    if not target_file:
+        return ToolCallResult(success=False, error="target_file is required")
+    try:
+        local_path = _resolve_workspace_path(request)
+    except WorkspaceAuthorizationError as exc:
+        return ToolCallResult(success=False, error=str(exc))
 
     db = SessionLocal()
     try:
@@ -85,52 +125,49 @@ workspace_read_file 函数用于读取当前仓库工作区中的 UTF-8 文本�
 如果读取操作失败，函数将返回一个包含错误信息的 ToolCallResult 对象。 
 """
 async def workspace_read_file(request: ToolCallRequest) -> ToolCallResult:
-    local_path = request.arguments.get("local_path")
     target_file = request.arguments.get("target_file")
 
-    if not local_path or not target_file:
-        return ToolCallResult(success=False, error="local_path and target_file are required")
+    if not target_file:
+        return ToolCallResult(success=False, error="target_file is required")
 
     try:
+        local_path = _resolve_workspace_path(request)
         content = workspace_service.read_file(local_path, target_file)
         return ToolCallResult(
             success=True,
             content=content,
             structured_content={"file": target_file, "content": content},
         )
-    except WorkspaceError as exc:
+    except (WorkspaceAuthorizationError, WorkspaceError) as exc:
         return ToolCallResult(success=False, error=str(exc))
 
 
 async def workspace_list_files(request: ToolCallRequest) -> ToolCallResult:
-    local_path = request.arguments.get("local_path")
     target_dir = request.arguments.get("target_dir", ".")
     max_files = request.arguments.get("max_files", 200)
 
-    if not local_path:
-        return ToolCallResult(success=False, error="local_path is required")
-
     try:
+        local_path = _resolve_workspace_path(request)
         files = workspace_service.list_files(local_path, target_dir=target_dir, max_files=max_files)
         return ToolCallResult(
             success=True,
             content="Files listed successfully",
             structured_content={"files": files},
         )
-    except WorkspaceError as exc:
+    except (WorkspaceAuthorizationError, WorkspaceError) as exc:
         return ToolCallResult(success=False, error=str(exc))
 
 
 async def workspace_search_code(request: ToolCallRequest) -> ToolCallResult:
-    local_path = request.arguments.get("local_path")
     query = request.arguments.get("query")
     target_dir = request.arguments.get("target_dir", ".")
     max_results = request.arguments.get("max_results", 50)
 
-    if not local_path or not query:
-        return ToolCallResult(success=False, error="local_path and query are required")
+    if not query:
+        return ToolCallResult(success=False, error="query is required")
 
     try:
+        local_path = _resolve_workspace_path(request)
         results = workspace_service.search_code(
             local_path,
             query=query,
@@ -142,41 +179,33 @@ async def workspace_search_code(request: ToolCallRequest) -> ToolCallResult:
             content="Search completed successfully",
             structured_content={"results": results},
         )
-    except WorkspaceError as exc:
+    except (WorkspaceAuthorizationError, WorkspaceError) as exc:
         return ToolCallResult(success=False, error=str(exc))
 
 
 async def workspace_get_diff(request: ToolCallRequest) -> ToolCallResult:
-    local_path = request.arguments.get("local_path")
-
-    if not local_path:
-        return ToolCallResult(success=False, error="local_path is required")
-
     try:
+        local_path = _resolve_workspace_path(request)
         diff = workspace_service.get_diff(local_path)
         return ToolCallResult(
             success=True,
             content="Diff retrieved successfully",
             structured_content={"diff": diff},
         )
-    except WorkspaceError as exc:
+    except (WorkspaceAuthorizationError, WorkspaceError) as exc:
         return ToolCallResult(success=False, error=str(exc))
 
 
 async def workspace_get_changed_files(request: ToolCallRequest) -> ToolCallResult:
-    local_path = request.arguments.get("local_path")
-
-    if not local_path:
-        return ToolCallResult(success=False, error="local_path is required")
-
     try:
+        local_path = _resolve_workspace_path(request)
         files = workspace_service.get_changed_files(local_path)
         return ToolCallResult(
             success=True,
             content="Changed files retrieved successfully",
             structured_content={"changed_files": files},
         )
-    except WorkspaceError as exc:
+    except (WorkspaceAuthorizationError, WorkspaceError) as exc:
         return ToolCallResult(success=False, error=str(exc))
 
 

@@ -21,7 +21,12 @@ AgentHub 是一个面向软件开发场景的 AI Agent 协作平台。用户可�
 - Orchestrator 计划确认后执行
 - Agent 通过原生 LLM Tool Calling 修改真实 workspace 文件
 - ToolRegistry 统一执行风险检查、审计、任务日志和 Local / MCP / Hybrid 路由
-- `[FILE:]`、`[DELETE:]`、`[RENAME:]` 仅作为迁移期兼容协议
+- ContextAssembler 统一 Conversation、Repository、RAG、执行结果和错误预算
+- 关键词 + 向量 RRF 混合代码检索与自动增量索引
+- 受限 test/lint/type/build CommandRunner 与真实 VerificationService
+- 验证失败最多两次自动修复，不以文本自报成功
+- 脱敏结构化 Agent 事件与可重复 offline evaluation gate
+- `[FILE:]`、`[DELETE:]`、`[RENAME:]` 默认关闭，仅保留显式迁移兼容
 - CodeChange 生成 Diff
 - CodeChange Accept / Reject / Revise
 - CodeChange 版本链：`parent_code_change_id`、`revision_index`
@@ -81,6 +86,7 @@ agenthub-backend/
 ├── agenthub-frontend/       # 前端项目
 ├── alembic/                 # 数据库迁移
 ├── docs/flowcharts.md       # 详细流程图
+├── evals/                   # 固定数据集、指标、runner 和报告
 ├── tests/                   # 后端测试
 ├── docker-compose.yml       # Redis 等依赖服务
 └── README.md
@@ -95,6 +101,10 @@ python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+后端将 `mcp[cli]` 固定在 `>=1.27,<2` 的 MCP SDK v1 兼容范围内，以保持现有
+`FastMCP`、`ClientSession` 和 `streamable_http_client` 调用方式稳定。本轮不升级到
+MCP SDK v2；升级前需要单独验证 Server、Client 与 Streamable HTTP 的兼容性。
 
 安装前端依赖：
 
@@ -340,7 +350,9 @@ LLM Native Tool Calling
 
 ### Legacy 文本协议 fallback
 
-历史 `[FILE:]`、`[DELETE:]`、`[RENAME:]` 文本协议没有被删除，但只作为 temporary compatibility fallback：
+历史 `[FILE:]`、`[DELETE:]`、`[RENAME:]` 文本协议没有被删除，但默认关闭，只作为
+读取历史模型响应或显式迁移场景的 temporary compatibility fallback。原生 Tool Calling
+是新任务唯一的默认文件操作路径。
 
 ```text
 模型没有返回 tool_calls
@@ -363,13 +375,15 @@ LLM Native Tool Calling
 [RENAME: old/path -> new/path]
 ````
 
-关闭 fallback：
+默认配置：
 
 ```env
 AGENT_LEGACY_FILE_PROTOCOL_FALLBACK=false
 ```
 
-关闭后，即使普通文本回复包含历史 marker，也不会执行文件操作。新代码不得直接调用 marker parser，现有 parser 仅用于旧模型响应或已保存工作流的迁移兼容。
+默认关闭时，即使普通文本回复包含历史 marker，也不会执行文件操作。只有运维人员为
+历史兼容显式设置 `AGENT_LEGACY_FILE_PROTOCOL_FALLBACK=true` 时才启用 parser。新代码
+不得直接调用 marker parser，现有 parser 仅用于旧模型响应或已保存工作流的迁移兼容。
 
 安全限制：
 
@@ -558,3 +572,29 @@ git status
 - PR 状态目前创建时保存，后续可以增加 GitHub 状态同步。
 - 本地预览构建直接在 workspace 执行，生产环境建议改成容器隔离构建。
 - 内存限流适合单进程开发环境，多实例部署应改成 Redis 限流。
+
+## Agent evaluation
+
+Run the deterministic offline evaluation gate without external API keys:
+
+```powershell
+python -m evals.run --mode offline --output evals/reports/latest.json
+```
+
+The command also writes `evals/reports/latest.md` and exits with status 1 when
+the planner, retrieval, context, tool, or verification smoke thresholds fail.
+Live evaluation is optional and is skipped cleanly when no API key is configured:
+
+```powershell
+python -m evals.run --mode live --output evals/reports/live.json
+```
+
+## Hardened Agent documentation
+
+- [Agent architecture](docs/agent-architecture.md)
+- [Agent security model](docs/agent-security-model.md)
+- [Agent evaluation guide](docs/agent-evaluation.md)
+- [10-minute demo script](docs/demo/agent-internship-demo.md)
+- [System flowcharts](docs/flowcharts.md)
+
+关键安全配置包括 `MCP_INTERNAL_TOKEN`、`MCP_TOOL_MODE`、受限命令超时/输出上限、Embedding provider，以及 `AGENT_CONTEXT_*` 分类预算。默认 embedding provider 为本地 deterministic hash；生产可切换 OpenAI-compatible endpoint。不要向模型参数、日志或代码仓库暴露 token 与绝对 workspace 路径。

@@ -1,10 +1,17 @@
+import time
 from typing import Callable, Awaitable
+from app.core.logging import (
+    get_logger,
+    log_agent_event,
+    safe_error_summary,
+)
 from app.core.config import settings
 from app.mcp.client import MCPToolClient
 from app.tools.base import ToolCallRequest, ToolCallResult, ToolDefinition, ToolRiskLevel
 
 
 ToolHandler = Callable[[ToolCallRequest], Awaitable[ToolCallResult]]
+logger = get_logger("tools")
 
 # 整个系统中，ToolRegistry 类是一个核心组件，用于管理和调用各种工具。
 # 它提供了注册工具、列出工具、获取工具定义以及调用工具的功能。
@@ -36,6 +43,7 @@ class ToolRegistry:
         return self._definitions.get(name)
 
     async def call(self, request: ToolCallRequest) -> ToolCallResult:
+        started = time.perf_counter()
         definition = self._definitions.get(request.name)
         if definition is None:
             return ToolCallResult(success=False, error=f"Unknown tool: {request.name}")
@@ -47,6 +55,19 @@ class ToolRegistry:
             )
 
         result = await self._execute(request)
+        log_agent_event(
+            logger,
+            "mcp.tool_called",
+            task_id=request.task_id,
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+            repository_id=request.repository_id,
+            tool_name=request.name,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            success=result.success,
+            error_type=None if result.success else "ToolCallError",
+            error_summary=safe_error_summary(result.error),
+        )
         self._record_audit(request, result, definition)
         self._broadcast_task_log(request, result)
         return result
@@ -89,12 +110,31 @@ class ToolRegistry:
                 success=False,
                 error="MCP tool mode is enabled, but mcp_workspace_server_url is not configured.",
             )
+        if not settings.mcp_internal_token:
+            return ToolCallResult(
+                success=False,
+                error="MCP tool mode is enabled, but mcp_internal_token is not configured.",
+            )
+        if request.repository_id is None or request.user_id is None:
+            return ToolCallResult(
+                success=False,
+                error="MCP workspace tools require trusted repository_id and user_id.",
+            )
 
         client = MCPToolClient(settings.mcp_workspace_server_url, token=settings.mcp_internal_token)
         mcp_name = self._to_mcp_tool_name(request.name)
+        arguments = {
+            key: value
+            for key, value in request.arguments.items()
+            if key not in {"local_path", "repository_id", "user_id"}
+        }
+        arguments.update(
+            repository_id=request.repository_id,
+            user_id=request.user_id,
+        )
 
         try:
-            result = await client.call_tool(mcp_name, request.arguments)
+            result = await client.call_tool(mcp_name, arguments)
         except Exception as exc:
             return ToolCallResult(success=False, error=f"MCP tool call failed: {exc}")
 
@@ -137,10 +177,24 @@ class ToolRegistry:
                 if task:
                     log_msg = f"Tool '{request.name}' executed."
                     if not result.success:
-                        log_msg += f" Error: {result.error}"
+                        log_msg += (
+                            f" Error: {safe_error_summary(result.error)}"
+                        )
                     
                     # 避免在异步上下文中直接调用需要 await 的服务，使用任务发射或者确保正确环境
                     asyncio.create_task(task_service.broadcast_task_log(task, log_msg))
+            except Exception as exc:
+                log_agent_event(
+                    logger,
+                    "tool.broadcast_failed",
+                    task_id=request.task_id,
+                    conversation_id=request.conversation_id,
+                    user_id=request.user_id,
+                    repository_id=request.repository_id,
+                    tool_name=request.name,
+                    success=False,
+                    error_type=type(exc).__name__,
+                )
             finally:
                 db.close()
 

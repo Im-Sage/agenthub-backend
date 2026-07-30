@@ -22,35 +22,53 @@ AGENT_TOOL_PROFILES = {
         "workspace.read_file",
         "workspace.list_files",
         "workspace.search_code",
+        "workspace.semantic_search",
         "workspace.write_file",
         "workspace.rename_file",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_type_check",
+        "workspace.run_build",
     },
     "backend": {
         "workspace.read_file",
         "workspace.list_files",
         "workspace.search_code",
+        "workspace.semantic_search",
         "workspace.write_file",
         "workspace.rename_file",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_type_check",
     },
     "frontend": {
         "workspace.read_file",
         "workspace.list_files",
         "workspace.search_code",
+        "workspace.semantic_search",
         "workspace.write_file",
         "workspace.rename_file",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_build",
     },
     "reviewer": {
         "workspace.read_file",
         "workspace.list_files",
         "workspace.search_code",
+        "workspace.semantic_search",
         "workspace.get_diff",
         "workspace.get_changed_files",
+        "workspace.run_tests",
+        "workspace.run_lint",
+        "workspace.run_type_check",
+        "workspace.run_build",
     },
 }
 
@@ -81,13 +99,20 @@ def _model_input_schema(
     schema.setdefault("type", "object")
 
     properties = dict(schema.get("properties") or {})
-    properties.pop("local_path", None)
+
+    # 这些参数来自服务端可信调用上下文，不能由模型查看或覆盖。
+    for trusted_parameter in (
+        "local_path",
+        "repository_id",
+        "user_id",
+    ):
+        properties.pop(trusted_parameter, None)
     schema["properties"] = properties
 
     required = [
         item
         for item in schema.get("required", [])
-        if item != "local_path"
+        if item not in {"local_path", "repository_id", "user_id"}
     ]
 
     if required:
@@ -99,7 +124,7 @@ def _model_input_schema(
 
 
 """
-build_model_tools 函数用于根据智能体代码和工作区关联状态，构建模型可调用的工具列表和工具名称映射。
+build_model_tools 函数用于根据 Agent 角色筛选工具。
 参数说明：
 - agent_code: 智能体代码，用于确定允许调用的工具集合。
 - has_workspace: 布尔值，表示是否关联了可信的工作区。如果为 False，则不允许调用任何工作区相关的工具。
@@ -179,6 +204,8 @@ async def run_tool_calling_agent(
     messages: list[BaseMessage],
     agent_code: str,
     repo_path: str | None,
+    repository_id: int | None = None,
+    user_id: int | None = None,
     task_id: int | None,
     conversation_id: int | None,
     legacy_fallback: bool | None = None,
@@ -194,7 +221,10 @@ async def run_tool_calling_agent(
     # build_model_tools 函数根据智能体代码和工作区关联状态，构建模型可调用的工具列表和工具名称映射。
     model_tools, reverse_map = build_model_tools(
         agent_code,
-        has_workspace=bool(repo_path),
+        has_workspace=bool(
+            repo_path
+            or (repository_id is not None and user_id is not None)
+        ),
     )
     # bind_tools 方法将工具绑定到语言模型（llm）上，使得模型可以调用这些工具。
     # 它会将工具的定义传递给模型，使模型在生成响应时能够识别和调用这些工具。
@@ -204,15 +234,17 @@ async def run_tool_calling_agent(
     conversation = list(messages)
     changed_files: list[str] = []
 
-    #
+
     for _ in range(round_limit):
         # ainvoke 方法是一个异步调用，用于向模型发送当前的对话消息（conversation），并获取模型的响应。
         # 这里的模型响应可能包含工具调用请求（tool_calls），也可能只是普通的文本响应。
+        # response是模型建议调用的工具列表，每个工具调用包含工具名称、参数等信息。模型可能会在响应中建议调用一个或多个工具，以便执行特定的操作。
         response = await model.ainvoke(conversation)
         conversation.append(response)
 
         # getattr(response, "tool_calls", []) or [] 获取模型响应中的工具调用请求（tool_calls）。
         # 如果模型响应中没有工具调用请求，则返回一个空列表。这样可以确保在后续处理中，即使没有工具调用请求，也不会引发错误。
+        # tool_calls是模型 建议 调用的工具列表，每个工具调用包含工具名称、参数等信息。模型可能会在响应中建议调用一个或多个工具，以便执行特定的操作。
         tool_calls = list(
             getattr(response, "tool_calls", []) or []
         )
@@ -240,16 +272,17 @@ async def run_tool_calling_agent(
                     messages=conversation,
                     used_legacy_fallback=True,
                 )
-
+            # 如果模型响应中没有工具调用请求，并且不需要使用旧的文件操作回退机制，则直接返回一个 ToolCallingRunResult 对象，
+            # 其中包含对话摘要、变更文件列表、对话消息以及是否使用了旧的文件操作回退机制（此处为 False）。
             return ToolCallingRunResult(
                 summary=content,
                 changed_files=list(dict.fromkeys(changed_files)),
                 messages=conversation,
                 used_legacy_fallback=False,
             )
-        # tool_calls 列表中包含了模型请求调用的工具信息，每个工具调用信息是一个字典，包含工具的名称、参数等。
+        # tool_calls 列表中包含了所有模型建议调用的工具，每个工具调用包含工具名称、参数等信息。
         for call in tool_calls:
-            call_id = str(call.get("id") or "")
+            call_id = str(call.get("id") or "") # 工具调用的唯一标识
             external_name = str(call.get("name") or "")
             registry_name = reverse_map.get(external_name)
             # 如果模型请求调用的工具名称在 reverse_map 中找不到对应的注册表名称，则说明该工具是未知的或不允许调用的。
@@ -271,9 +304,18 @@ async def run_tool_calling_agent(
                 continue
             # arguments 字典用于存储工具调用的参数，从模型请求中获取 "args" 字段，如果没有提供参数，则使用空字典。
             arguments = dict(call.get("args") or {})
+            for trusted_parameter in (
+                "local_path",
+                "repository_id",
+                "user_id",
+            ):
+                arguments.pop(trusted_parameter, None)
             # 如果工具名称以 "workspace." 开头，表示这是一个工作区相关的工具调用。在这种情况下，如果没有提供 repo_path，则无法访问工作区，因此会返回一个错误消息，提示工作区不可用。
             if registry_name.startswith("workspace."):
-                if not repo_path:
+                if not (
+                    (repository_id is not None and user_id is not None)
+                    or repo_path
+                ):
                     conversation.append(
                         ToolMessage(
                             content=json.dumps(
@@ -288,7 +330,13 @@ async def run_tool_calling_agent(
                     )
                     continue
 
-                arguments["local_path"] = repo_path
+                if (
+                    repository_id is None
+                    and user_id is None
+                    and repo_path
+                    and not settings.mcp_enabled
+                ):
+                    arguments["local_path"] = repo_path
 
             # 这里调用 tool_registry.call 方法来执行工具调用请求。
             # 它会将工具名称、任务ID、会话ID和参数传递给工具注册表，以便实际执行工具的逻辑。
@@ -297,6 +345,8 @@ async def run_tool_calling_agent(
                     name=registry_name,
                     task_id=task_id,
                     conversation_id=conversation_id,
+                    repository_id=repository_id,
+                    user_id=user_id,
                     arguments=arguments,
                     require_confirmation=False,
                 )
@@ -309,7 +359,7 @@ async def run_tool_calling_agent(
                 )
                 if isinstance(files, list):
                     changed_files.extend(str(path) for path in files)
-
+            # 每一轮工具调用的结果都会被封装成一个 ToolMessage 对象，并附加到 conversation 列表中，以便在后续的对话中可以参考这些结果。
             conversation.append(
                 ToolMessage(
                     content=json.dumps(

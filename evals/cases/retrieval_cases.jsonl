@@ -1,0 +1,15 @@
+{"id":"retrieval-001","query":"AGENT_TOOL_PROFILES = {","expected_paths":["app/agents/tool_calling.py"]}
+{"id":"retrieval-002","query":"async def generate_orchestrator_plan(","expected_paths":["app/agents/graph/schemas.py"]}
+{"id":"retrieval-003","query":"class VerificationService:","expected_paths":["app/services/verification_service.py"]}
+{"id":"retrieval-004","query":"class WorkspaceChunker:","expected_paths":["app/rag/chunking.py"]}
+{"id":"retrieval-005","query":"class HashEmbeddingProvider:","expected_paths":["app/rag/embeddings.py"]}
+{"id":"retrieval-006","query":"class RepositoryIndexService:","expected_paths":["app/rag/index_service.py"]}
+{"id":"retrieval-007","query":"class HybridCodeRetriever:","expected_paths":["app/rag/retrieval.py"]}
+{"id":"retrieval-008","query":"class ContextAssembler:","expected_paths":["app/agents/context/assembler.py"]}
+{"id":"retrieval-009","query":"class CommandRunner:","expected_paths":["app/services/command_runner.py"]}
+{"id":"retrieval-010","query":"class RepositoryResolver:","expected_paths":["app/mcp/repository_resolver.py"]}
+{"id":"retrieval-011","query":"def register_rag_tools(","expected_paths":["app/tools/rag_tools.py"]}
+{"id":"retrieval-012","query":"def create_agent_graph(","expected_paths":["app/agents/graph/workflow.py"]}
+{"id":"retrieval-013","query":"def run_agent_task(","expected_paths":["app/workers/agent_tasks.py"]}
+{"id":"retrieval-014","query":"async def create_repository(","expected_paths":["app/services/repo_service.py"]}
+{"id":"retrieval-015","query":"在哪里限制模型可使用的工具","expected_paths":["app/agents/tool_calling.py"]}

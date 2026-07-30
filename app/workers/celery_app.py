@@ -10,7 +10,10 @@ celery_app = Celery(
     broker=settings.redis_url,
     backend=settings.redis_url,
     # 显式包含任务模块，确保 Worker 启动时能加载它们
-    include=["app.workers.agent_tasks"],
+    include=[
+        "app.workers.agent_tasks",
+        "app.workers.index_tasks",
+    ],
 )
 
 

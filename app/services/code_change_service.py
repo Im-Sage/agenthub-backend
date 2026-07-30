@@ -53,8 +53,10 @@ def create_revision_task(db: Session, code_change: CodeChange, source_task: Task
         "Revise the previous code change according to the user's rejection feedback.\n\n"
         f"Original task:\n{source_task.instruction}\n\n"
         f"Rejection reason:\n{code_change.reject_reason}\n\n"
-        "Use the existing workspace state and produce corrected file operations. "
-        "If files need to be changed, use [FILE:], [DELETE:], or [RENAME:] markers."
+        "Inspect the existing workspace state and revise the rejected change.\n"
+        "Use the registered workspace tools for all file reads and writes.\n"
+        "Do not emit [FILE:], [DELETE:], or [RENAME:] markers.\n"
+        "Run the available verification tools before returning the final summary."
     )
 
     revision_task = Task(

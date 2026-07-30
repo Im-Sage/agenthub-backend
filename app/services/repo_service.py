@@ -1,4 +1,5 @@
 import json
+import logging
 import shutil
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from app.services.workspace_service import workspace_service, WorkspaceError
 
 
 WORKSPACE_ROOT = PROJECT_ROOT / "workspaces"
+logger = logging.getLogger(__name__)
 
 
 async def create_repository(
@@ -47,6 +49,15 @@ async def create_repository(
     repository.local_path = str(workspace_path)
     db.commit()
     db.refresh(repository)
+    try:
+        from app.workers.index_tasks import index_repository_task
+
+        index_repository_task.delay(repository.id)
+    except Exception:
+        logger.exception(
+            "repository_index_dispatch_failed repository_id=%s",
+            repository.id,
+        )
     return repository
 
 

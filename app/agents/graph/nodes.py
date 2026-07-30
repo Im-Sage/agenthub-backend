@@ -1,43 +1,18 @@
 import json
-import re
 from datetime import datetime
 from typing import Any, Dict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
 from app.agents.base import AgentRunRequest
+from app.agents.graph.schemas import generate_orchestrator_plan
 from app.agents.graph.state import AgentState
 from app.agents.llm_factory import get_chat_llm
 from app.db.session import SessionLocal
 from app.models.task import Task
 from app.schemas.enums import MessageType, SenderType, TaskStatus
-
-
-def _extract_plan(content: str) -> list[dict[str, str]]:
-    try:
-        match = re.search(r"\[[\s\S]*\]", content)
-        raw_plan = json.loads(match.group()) if match else []
-    except Exception:
-        raw_plan = []
-
-    plan: list[dict[str, str]] = []
-    for step in raw_plan:
-        if not isinstance(step, dict):
-            continue
-        agent = str(step.get("agent") or "backend").strip()
-        instruction = str(step.get("instruction") or "").strip()
-        if not instruction:
-            continue
-        if agent not in {"backend", "frontend", "reviewer"}:
-            agent = "backend"
-        plan.append({"agent": agent, "instruction": instruction})
-
-    if plan:
-        return plan
-
-    return [{"agent": "backend", "instruction": content.strip() or "Handle the user request."}]
-
+from app.services.verification_service import verification_service
 
 def _child_ids_from_state(state: AgentState) -> list[int]:
     try:
@@ -52,19 +27,12 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
     from app.services import task_service
 
     llm = get_chat_llm()
-    messages = [
-        SystemMessage(
-            content=(
-                "You are a software task orchestrator. Split the user goal into a JSON array only. "
-                "Each item must contain agent and instruction. agent must be one of backend, "
-                "frontend, reviewer. Do not include Markdown or explanatory text."
-            )
-        ),
-        HumanMessage(content=f"User goal: {state['messages'][0].content}"),
+    user_goal = str(state["messages"][0].content)
+    orchestrator_plan = await generate_orchestrator_plan(llm, user_goal)
+    plan = [
+        step.model_dump()
+        for step in orchestrator_plan.steps
     ]
-
-    response = await llm.ainvoke(messages)
-    plan = _extract_plan(str(response.content))
 
     db = SessionLocal()
     child_ids: list[int] = []
@@ -72,6 +40,7 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
         parent_task = db.get(Task, state["task_id"])
         if parent_task:
             for step in plan:
+                #  Planner 创建子任务时，只写入数据库，没有调用 Celery 执行，子任务的执行由 execute_node() 负责
                 child_task = task_service.create_subtask(
                     db,
                     parent_task,
@@ -185,7 +154,30 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
         context = {
             "agent_code": agent_code,
             "system_prompt": system_prompt,
+            "previous_results": list(
+                state.get("execution_results") or []
+            ),
+            "previous_errors": list(state.get("errors") or []),
+            "plan_step_index": current_step_index,
+            "parent_task_id": state["task_id"],
+            "verification_results": list(
+                state.get("verification_results") or []
+            ),
+            "changed_files": [
+                file_path
+                for execution in state.get("execution_results") or []
+                for file_path in execution.get("files") or []
+            ],
         }
+        if agent_code == "reviewer" and repo_path:
+            try:
+                context["git_diff_summary"] = workspace_service.get_diff(
+                    repo_path
+                )[-8_000:]
+            except Exception as exc:
+                context["git_diff_summary"] = (
+                    f"Git diff unavailable: {type(exc).__name__}"
+                )
 
         if state.get("errors"):
             if child_task:
@@ -206,6 +198,8 @@ async def execute_node(state: AgentState) -> Dict[str, Any]:
                 conversation_id=state["conversation_id"],
                 instruction=instruction,
                 repo_path=repo_path,
+                repository_id=state.get("repository_id"),
+                user_id=state.get("user_id"),
                 context=context,
                 task=child_task,
             )
@@ -263,23 +257,38 @@ async def verify_node(state: AgentState) -> Dict[str, Any]:
 
     last_result = execution_results[-1]
     instruction = state.get("current_instruction") or ""
-
-    wants_code = any(keyword in instruction.lower() for keyword in ["code", "代码", "写一个"])
-    if state.get("repo_path") and wants_code and not last_result.get("files"):
+    repository_id = state.get("repository_id")
+    user_id = state.get("user_id")
+    if repository_id is None or user_id is None:
         return {
-            "errors": [
-                "Code was requested but no [FILE: path] code block was produced, so no file could be saved."
-            ]
+            "errors": ["Repository and user identity are required for verification."]
         }
 
-    content = str(last_result.get("content") or "")
-    if "python" in instruction.lower() and "def" in content and "SyntaxError" in content:
-        return {"errors": ["Potential Python syntax error detected."]}
+    verification = verification_service.verify(
+        repository_id=repository_id,
+        user_id=user_id,
+        changed_files=list(last_result.get("files") or []),
+        instruction=instruction,
+    )
+    serialized = verification.model_dump()
+    if not verification.success:
+        attempts = state.get("verification_attempts", 0) + 1
+        failure_summary = (
+            verification.failure_summary or "Verification failed."
+        )
+        return {
+            "verification_results": [serialized],
+            "verification_attempts": attempts,
+            "errors": [failure_summary],
+            "is_finished": attempts > 2,
+        }
 
     next_index = current_step_index + 1
     is_finished = next_index >= len(plan)
 
     return {
+        "verification_results": [serialized],
+        "verification_attempts": 0,
         "current_step_index": next_index,
         "current_agent": plan[next_index]["agent"] if not is_finished else None,
         "current_instruction": plan[next_index]["instruction"] if not is_finished else None,
@@ -294,18 +303,42 @@ async def summarize_node(state: AgentState) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         parent_task = db.get(Task, state["task_id"])
-        summary = (
-            "LangGraph orchestrator completed.\n"
-            f"Completed {len(state.get('plan') or [])} steps."
+        verification_failed = (
+            state.get("verification_attempts", 0) > 2
+            and bool(state.get("errors"))
         )
+        if verification_failed:
+            summary = (
+                "LangGraph orchestrator failed verification after "
+                "two automatic repair attempts.\n"
+                f"{state['errors'][-1]}"
+            )
+        else:
+            summary = (
+                "LangGraph orchestrator completed.\n"
+                f"Completed {len(state.get('plan') or [])} steps."
+            )
         if parent_task:
             try:
                 metadata = json.loads(parent_task.metadata_json or "{}")
             except json.JSONDecodeError:
                 metadata = {}
-            metadata["plan_status"] = "executed"
-            parent_task.status = TaskStatus.SUCCESS
+            metadata["plan_status"] = (
+                "verification_failed"
+                if verification_failed
+                else "executed"
+            )
+            parent_task.status = (
+                TaskStatus.FAILED
+                if verification_failed
+                else TaskStatus.SUCCESS
+            )
             parent_task.result_summary = summary
+            parent_task.error_message = (
+                state["errors"][-1]
+                if verification_failed
+                else None
+            )
             parent_task.metadata_json = json.dumps(metadata, ensure_ascii=False)
             parent_task.finished_at = datetime.utcnow()
             db.commit()
