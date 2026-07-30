@@ -7,20 +7,11 @@
 
 | Metric | Value |
 | --- | ---: |
-| `average_tool_rounds` | 1.0000 |
-| `context_truncation_rate` | 0.0500 |
+| `planner_dag_validity_rate` | 1.0000 |
 | `planner_fallback_rate` | 0.0500 |
 | `planner_schema_success_rate` | 1.0000 |
-| `retrieval_mrr` | 0.8000 |
-| `retrieval_recall_at_5` | 0.9333 |
-| `tool_call_success_rate` | 1.0000 |
-| `verification_pass_rate` | 1.0000 |
+| `planner_scope_validity_rate` | 1.0000 |
 
 ## Failed cases
 
-### retrieval-015
-
-- Type: `retrieval`
-- Reason: expected_path_not_in_top_5
-- Expected: ["app/agents/tool_calling.py"]
-- Actual: ["app/tools/registry.py", "app/tools/registry.py", "app/agents/graph/nodes.py", "app/agents/graph/nodes.py", "app/__init__.py"]
+None.

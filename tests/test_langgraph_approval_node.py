@@ -56,12 +56,20 @@ def install_plan_node_fakes(monkeypatch, parent_metadata, generated_plan):
         agent_code,
         instruction,
         task_type=None,
+        depends_on=None,
+        step_key=None,
+        step_index=None,
+        write_scope=None,
     ):
         child_task = SimpleNamespace(
             id=900 + len(child_tasks),
             agent_code=agent_code,
             instruction=instruction,
             task_type=task_type,
+            depends_on=depends_on,
+            step_key=step_key,
+            step_index=step_index,
+            write_scope=write_scope,
         )
         child_tasks.append(child_task)
         return child_task
@@ -98,8 +106,24 @@ def test_agent_state_declares_approval_status():
 
 
 def test_plan_node_does_not_reuse_confirmed_database_plan(monkeypatch):
-    old_plan = [{"agent": "frontend", "instruction": "Old plan"}]
-    new_plan = [{"agent": "backend", "instruction": "New plan"}]
+    old_plan = [
+        {
+            "id": "old",
+            "agent": "frontend",
+            "instruction": "Old plan",
+            "depends_on": [],
+            "write_scope": ["agenthub-frontend"],
+        }
+    ]
+    new_plan = [
+        {
+            "id": "new",
+            "agent": "backend",
+            "instruction": "New plan",
+            "depends_on": [],
+            "write_scope": ["app"],
+        }
+    ]
 
     observed = install_plan_node_fakes(
         monkeypatch,
@@ -117,7 +141,15 @@ def test_plan_node_does_not_reuse_confirmed_database_plan(monkeypatch):
 
 
 def test_plan_node_leaves_parent_and_graph_waiting_for_approval(monkeypatch):
-    plan = [{"agent": "backend", "instruction": "Implement persistence"}]
+    plan = [
+        {
+            "id": "persistence",
+            "agent": "backend",
+            "instruction": "Implement persistence",
+            "depends_on": [],
+            "write_scope": ["app/models", "alembic"],
+        }
+    ]
 
     observed = install_plan_node_fakes(monkeypatch, {}, plan)
 
@@ -126,6 +158,10 @@ def test_plan_node_leaves_parent_and_graph_waiting_for_approval(monkeypatch):
     assert observed.parent_task.finished_at is None
     assert metadata["plan_status"] == "awaiting_confirmation"
     assert metadata["child_ids"] == [900]
+    assert observed.child_tasks[0].step_key == "persistence"
+    assert observed.child_tasks[0].step_index == 0
+    assert observed.child_tasks[0].depends_on == []
+    assert observed.child_tasks[0].write_scope == ["app/models", "alembic"]
     assert observed.result == {
         "plan": plan,
         "current_step_index": 0,
@@ -170,7 +206,15 @@ def test_approval_node_consumes_resume_value_without_side_effects(
     monkeypatch.setattr(nodes, "SessionLocal", forbidden_side_effect)
     monkeypatch.setattr(nodes, "get_chat_llm", forbidden_side_effect)
 
-    plan = [{"agent": "backend", "instruction": "Implement persistence"}]
+    plan = [
+        {
+            "id": "persistence",
+            "agent": "backend",
+            "instruction": "Implement persistence",
+            "depends_on": [],
+            "write_scope": ["app/models"],
+        }
+    ]
     result = asyncio.run(
         approval_node(
             {

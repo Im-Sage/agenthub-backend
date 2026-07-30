@@ -39,7 +39,7 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
     try:
         parent_task = db.get(Task, state["task_id"])
         if parent_task:
-            for step in plan:
+            for step_index, step in enumerate(plan):
                 #  Planner 创建子任务时，只写入数据库，没有调用 Celery 执行，子任务的执行由 execute_node() 负责
                 child_task = task_service.create_subtask(
                     db,
@@ -47,6 +47,10 @@ async def plan_node(state: AgentState) -> Dict[str, Any]:
                     step["agent"],
                     step["instruction"],
                     task_type="graph_subtask",
+                    depends_on=step["depends_on"],
+                    step_key=step["id"],
+                    step_index=step_index,
+                    write_scope=step["write_scope"],
                 )
                 child_ids.append(child_task.id)
                 await task_service.broadcast_task_event(child_task, "task.created")

@@ -30,6 +30,8 @@ def test_dataset_minimum_sizes_and_required_fields():
             "expected_agents",
             "min_steps",
             "max_steps",
+            "expect_dag_valid",
+            "expect_scope_valid",
         }
         <= set(case)
         for case in planner
@@ -68,6 +70,8 @@ def test_retrieval_recall_at_five_and_mrr():
 def test_threshold_failures_enforce_offline_gate():
     passing = {
         "planner_schema_success_rate": 1.0,
+        "planner_dag_validity_rate": 1.0,
+        "planner_scope_validity_rate": 1.0,
         "retrieval_recall_at_5": 0.8,
         "context_truncation_rate": 0.3,
         "tool_call_success_rate": 1.0,
@@ -79,6 +83,16 @@ def test_threshold_failures_enforce_offline_gate():
     assert threshold_failures(failing) == [
         "retrieval_recall_at_5: 0.7900 < 0.8000"
     ]
+
+
+def test_planner_suite_reports_measured_dag_and_scope_validity():
+    report = asyncio.run(run_evaluation("offline", suite="planner"))
+
+    assert report["gate_passed"] is True
+    assert report["metrics"]["planner_schema_success_rate"] == 1.0
+    assert report["metrics"]["planner_dag_validity_rate"] == 1.0
+    assert report["metrics"]["planner_scope_validity_rate"] == 1.0
+    assert report["case_counts"] == {"planner": 20}
 
 
 def test_json_and_markdown_reports_include_failures(tmp_path):

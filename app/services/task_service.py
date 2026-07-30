@@ -236,9 +236,21 @@ def create_subtask(
     agent_code: str,
     instruction: str,
     task_type: str | None = None,
-    depends_on: list[int] | None = None,
+    depends_on: list[str] | None = None,
+    step_key: str | None = None,
+    step_index: int | None = None,
+    write_scope: list[str] | None = None,
 ) -> Task:
     agent = get_or_create_agent(db, agent_code)
+    step_metadata = (
+        {
+            "step_key": step_key,
+            "step_index": step_index,
+            "write_scope": list(write_scope or []),
+        }
+        if step_key is not None
+        else None
+    )
     child_task = Task(
         conversation_id=parent_task.conversation_id,
         parent_task_id=parent_task.id,
@@ -247,6 +259,11 @@ def create_subtask(
         instruction=instruction,
         task_type=task_type,
         depends_on=json.dumps(depends_on) if depends_on else None,
+        metadata_json=(
+            json.dumps(step_metadata, ensure_ascii=False)
+            if step_metadata is not None
+            else None
+        ),
     )
     db.add(child_task)
     db.commit()
