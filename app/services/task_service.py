@@ -258,7 +258,18 @@ def create_subtask(
         status=TaskStatus.PENDING,
         instruction=instruction,
         task_type=task_type,
-        depends_on=json.dumps(depends_on) if depends_on else None,
+        depends_on=(
+            json.dumps(depends_on)
+            if depends_on is not None
+            else None
+        ),
+        step_key=step_key,
+        step_index=step_index,
+        write_scope_json=(
+            json.dumps(write_scope, ensure_ascii=False)
+            if write_scope is not None
+            else None
+        ),
         metadata_json=(
             json.dumps(step_metadata, ensure_ascii=False)
             if step_metadata is not None
