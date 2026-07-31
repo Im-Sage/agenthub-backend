@@ -19,6 +19,9 @@ AgentHub 是一个面向软件开发场景的 AI Agent 协作平台。用户可�
 - WebSocket 事件推送
 - LangGraph Orchestrator 任务拆解
 - Orchestrator 计划确认后执行
+- Celery Canvas DAG/Wave 子任务编排与 Git Worktree 隔离
+- SQLite / PostgreSQL LangGraph Checkpointer 可切换
+- MCP `tools/list` 动态发现、Schema 清洗与安全 profile
 - Agent 通过原生 LLM Tool Calling 修改真实 workspace 文件
 - ToolRegistry 统一执行风险检查、审计、任务日志和 Local / MCP / Hybrid 路由
 - ContextAssembler 统一 Conversation、Repository、RAG、执行结果和错误预算
@@ -134,6 +137,9 @@ DATABASE_URL=sqlite:///./agenthub.db
 REDIS_URL=redis://localhost:6379/0
 LOG_LEVEL=INFO
 
+LANGGRAPH_CHECKPOINT_BACKEND=sqlite
+LANGGRAPH_CHECKPOINT_PATH=./langgraph_checkpoints.sqlite3
+
 ALIYUN_API_KEY=
 ALIYUN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ALIYUN_MODEL=qwen-plus
@@ -158,6 +164,14 @@ MAX_AGENT_FILE_BYTES=500000
 - `ALIYUN_API_KEY` 为空时，真实 Qwen Agent 无法调用。
 - `GITHUB_TOKEN` 为空时，创建真实 GitHub PR 会失败。
 - SQLite 数据库默认写入项目根目录的 `agenthub.db`。
+
+PostgreSQL LangGraph checkpoint 示例：
+
+```env
+LANGGRAPH_CHECKPOINT_BACKEND=postgres
+LANGGRAPH_CHECKPOINT_DATABASE_URL=postgresql://agenthub:agenthub@localhost:5433/agenthub_checkpoints?sslmode=disable
+LANGGRAPH_CHECKPOINT_AUTO_SETUP=true
+```
 
 ## 数据库迁移
 
@@ -289,8 +303,14 @@ New-NetFirewallRule -DisplayName "AgentHub Frontend 5173" -Direction Inbound -Pr
 流程：
 
 ```text
-生成计划 -> 前端展示 Plan awaiting confirmation -> 用户 Confirm -> 执行子任务 -> 生成 Diff
+生成计划 -> LangGraph HITL 等待确认 -> 用户 Confirm
+-> Celery DAG/Wave -> 独立 Worktree 执行与验证
+-> integration branch 合并 -> 唯一 CodeChange
 ```
+
+并行 Agent 不共享 Workspace；每个 step 使用独立物理 Worktree 和 commit，Git
+cherry-pick 负责最终冲突检测。详见
+[Celery Orchestrator 与 Git Worktree](docs/orchestrator-celery-worktree.md)。
 
 ### CodeChange 审核
 
@@ -596,5 +616,8 @@ python -m evals.run --mode live --output evals/reports/live.json
 - [Agent evaluation guide](docs/agent-evaluation.md)
 - [10-minute demo script](docs/demo/agent-internship-demo.md)
 - [System flowcharts](docs/flowcharts.md)
+- [Celery Orchestrator 与 Git Worktree](docs/orchestrator-celery-worktree.md)
+- [LangGraph PostgreSQL Checkpointer](docs/langgraph-postgres-checkpointer.md)
+- [MCP 动态发现](docs/mcp-dynamic-discovery.md)
 
 关键安全配置包括 `MCP_INTERNAL_TOKEN`、`MCP_TOOL_MODE`、受限命令超时/输出上限、Embedding provider，以及 `AGENT_CONTEXT_*` 分类预算。默认 embedding provider 为本地 deterministic hash；生产可切换 OpenAI-compatible endpoint。不要向模型参数、日志或代码仓库暴露 token 与绝对 workspace 路径。

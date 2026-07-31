@@ -76,12 +76,13 @@ flowchart TD
     I -->|否| G
     I -->|是| J[POST /api/tasks/{id}/plan/confirm]
     J --> K[plan_status=confirmed]
-    K --> L[再次投递 run_orchestrator_task]
-    L --> M[LangGraph executor 顺序执行子任务]
-    M --> N[verifier 校验输出]
-    N -->|有错误| M
-    N -->|完成| O[summarizer 汇总结果]
-    O --> P[父任务 SUCCESS<br/>plan_status=executed]
+    K --> L[LangGraph 恢复已确认中断点]
+    L --> M[构建 Celery DAG/Wave Canvas]
+    M --> N[每个 child 在独立 Worktree 执行与验证]
+    N -->|有限修复| N
+    N -->|Wave 完成| O[按 step index cherry-pick 到 integration]
+    O -->|下一 Wave| M
+    O -->|全部完成| P[finalizer 生成唯一 CodeChange<br/>父任务 SUCCESS]
 ```
 
 ## 4. Worker 执行任务
@@ -268,4 +269,33 @@ flowchart TD
 模型可见工具参数不包含 `repository_id`、`user_id` 或 `local_path`。可信 identity 来自 Task/Conversation；RepositoryResolver 验证归属，WorkspaceService 验证路径，CommandRunner 限制 argv，VerificationService 使用真实命令判定是否推进。
 
 旧图第 4 节中的 FILE/DELETE/RENAME 标记仅代表历史兼容流程；当前默认路径是 Native Tool Calling，legacy marker fallback 默认关闭。
+
+## 13. 分布式 Orchestrator 与 MCP 启动
+
+```mermaid
+flowchart TD
+    H[LangGraph HITL Plan Confirmed] --> D[DAG Topological Waves]
+    D --> W0[Wave 0 Celery group]
+    W0 --> B[backend step Worktree]
+    W0 --> F[frontend step Worktree]
+    B --> C1[独立 commit]
+    F --> C2[独立 commit]
+    C1 --> M[按 step index 合并 integration]
+    C2 --> M
+    M -->|conflict| X[abort + DB failure]
+    M -->|success| W1[Wave 1 reviewer]
+    W1 --> R[基于已合并 integration]
+    R --> Z[finalizer: CodeChange + cleanup]
+```
+
+```mermaid
+flowchart LR
+    API[FastAPI lifespan] --> BOOT[Tool bootstrap]
+    WP[Celery worker_process_init] --> BOOT
+    BOOT --> LOCAL[幂等注册 local tools]
+    BOOT --> LIST[MCP tools/list]
+    LIST --> VALID[Schema / denylist / risk]
+    VALID --> ROUTE[精确 remote route]
+    ROUTE --> PROFILE[Agent profile model visibility]
+```
 

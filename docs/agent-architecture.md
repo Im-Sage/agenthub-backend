@@ -57,6 +57,25 @@ Qwen 只看到 ToolRegistry 发布的 JSON Schema。`repository_id`、`user_id` 
 
 Checkpoint 回答“工作流执行到哪里”；Memory/Conversation 回答“过去交流了什么”。两者不能互相替代。
 
+SQLite 是默认 checkpointer；PostgreSQL 模式使用 `AsyncPostgresSaver`，让相同
+`thread_id` 可由独立连接恢复。该切换保留 LangGraph HITL。计划确认后，LangGraph
+只负责控制流，长任务由 Celery Canvas 以 DAG/Wave 调度；每个 child 在独立 Git
+Worktree 执行、验证、commit，再按 step index 合并到 integration branch。
+
+并行步骤不能共享 Workspace，因为工作树文件、Git index、未提交 diff 与清理动作会
+互相竞争。详细恢复、取消、冲突和 CodeChange 语义见
+[orchestrator-celery-worktree.md](orchestrator-celery-worktree.md)；checkpointer 配置见
+[langgraph-postgres-checkpointer.md](langgraph-postgres-checkpointer.md)。
+
+## Dynamic MCP discovery
+
+API lifespan 与每个 Celery prefork 子进程独立执行工具 bootstrap。MCP `tools/list`
+结果先校验 name/description/inputSchema，再移除可信 identity/path 参数、赋予本地风险
+并注册精确 remote route。Local/Hybrid/MCP 路由不会改变 Agent profile 的信任边界：
+动态注册只是“系统知道该工具”，未知 namespaced 工具仍需在角色 profile 中显式配置才
+model-visible，HIGH 始终过滤。详见
+[mcp-dynamic-discovery.md](mcp-dynamic-discovery.md)。
+
 ## Observability and evaluation
 
 关键链路输出脱敏 JSON 事件，包括 task/repository identity、工具名、耗时、成功状态、错误类型、context token、检索块数、命令退出码和验证状态。日志不记录 prompt、完整代码、Authorization、token 或绝对工作区路径。
