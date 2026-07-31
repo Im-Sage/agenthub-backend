@@ -32,6 +32,9 @@ class FakeSession:
             return self.code_change
         return None
 
+    def scalar(self, statement):
+        return self.parent
+
     def scalars(self, statement):
         return self.children
 
@@ -111,6 +114,56 @@ def test_cancel_revokes_root_and_children_and_persists_soft_barrier(
     assert children[2].status == TaskStatus.SUCCESS
     assert db.commits == 1
     assert cleaned == [100]
+
+
+def test_cancel_locks_and_refreshes_latest_parent_before_transition(
+    monkeypatch,
+):
+    stale_parent = _parent(
+        TaskStatus.RUNNING,
+        {
+            "canvas_id": "stale-canvas",
+            "execution_generation": 1,
+        },
+    )
+    latest_parent = _parent(
+        TaskStatus.RUNNING,
+        {
+            "canvas_id": "latest-canvas",
+            "canvas_task_ids": ["latest-step"],
+            "execution_generation": 7,
+        },
+    )
+
+    class StaleIdentityMapSession(FakeSession):
+        def get(self, model, object_id):
+            if model is Task:
+                return stale_parent
+            return super().get(model, object_id)
+
+        def scalar(self, statement):
+            assert statement._for_update_arg is not None
+            assert statement.get_execution_options()["populate_existing"] is True
+            return latest_parent
+
+    db = StaleIdentityMapSession(latest_parent)
+    revoked = []
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service.celery_app.control,
+        "revoke",
+        lambda task_id, terminate: revoked.append(task_id),
+    )
+    monkeypatch.setattr(service, "_cleanup_safe_step_worktrees", lambda _: None)
+
+    result = service.cancel_orchestrator(latest_parent.id)
+
+    assert result["status"] == "cancelled"
+    assert set(revoked) == {"latest-canvas", "latest-step", "resume-task"}
+    assert latest_parent.status == TaskStatus.CANCELLED
+    assert json.loads(latest_parent.metadata_json)["execution_generation"] == 8
+    assert stale_parent.status == TaskStatus.RUNNING
+    assert db.commits == 1
 
 
 def test_retry_preserves_merged_steps_and_starts_first_incomplete_wave(
@@ -439,3 +492,179 @@ def test_only_valid_execution_phase_plan_is_recoverable():
         "plan": [{"id": "step", "agent": "backend", "instruction": "x", "depends_on": [], "write_scope": ["app/**"]}],
     })
     assert task_service.is_orchestrator_task(task) is True
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (ValueError("not retryable"), 409),
+        (RuntimeError("broker unavailable"), 503),
+    ],
+)
+def test_in_place_orchestrator_retry_maps_service_errors(
+    monkeypatch,
+    error,
+    expected_status,
+):
+    import asyncio
+
+    from fastapi import HTTPException, Response
+
+    from app.api import tasks as tasks_api
+
+    task = SimpleNamespace(id=100, parent_task_id=None)
+    db = SimpleNamespace(expire_all=lambda: None)
+    monkeypatch.setattr(tasks_api, "get_owned_task", lambda *_: task)
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "ensure_user_task_capacity",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "is_orchestrator_task",
+        lambda _: True,
+    )
+    monkeypatch.setattr(
+        tasks_api.orchestrator_recovery_service,
+        "retry_failed_orchestrator",
+        lambda _: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            tasks_api.retry_task(
+                100,
+                response=Response(status_code=201),
+                current_user=SimpleNamespace(id=1),
+                db=db,
+            )
+        )
+
+    assert raised.value.status_code == expected_status
+
+
+def test_in_place_orchestrator_retry_returns_accepted_without_changing_normal_default(
+    monkeypatch,
+):
+    import asyncio
+
+    from fastapi import Response
+
+    from app.api import tasks as tasks_api
+
+    task = SimpleNamespace(id=100, parent_task_id=None)
+    db = SimpleNamespace(expire_all=lambda: None)
+    response = Response(status_code=201)
+    monkeypatch.setattr(tasks_api, "get_owned_task", lambda *_: task)
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "ensure_user_task_capacity",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "is_orchestrator_task",
+        lambda _: True,
+    )
+    monkeypatch.setattr(
+        tasks_api.orchestrator_recovery_service,
+        "retry_failed_orchestrator",
+        lambda _: "retry-canvas",
+    )
+
+    async def noop_broadcast(*_):
+        return None
+
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "broadcast_task_event",
+        noop_broadcast,
+    )
+
+    retried = asyncio.run(
+        tasks_api.retry_task(
+            100,
+            response=response,
+            current_user=SimpleNamespace(id=1),
+            db=db,
+        )
+    )
+
+    assert retried is task
+    assert response.status_code == 202
+    assert tasks_api.router.routes[
+        next(
+            index
+            for index, route in enumerate(tasks_api.router.routes)
+            if getattr(route, "path", "") == "/{task_id}/retry"
+        )
+    ].status_code == 201
+
+
+def test_regular_retry_still_creates_and_dispatches_a_new_task(
+    monkeypatch,
+):
+    import asyncio
+
+    from fastapi import Response
+
+    from app.api import tasks as tasks_api
+
+    task = SimpleNamespace(
+        id=100,
+        parent_task_id=50,
+        agent=SimpleNamespace(adapter_type="mock"),
+    )
+    retried = SimpleNamespace(
+        id=101,
+        agent=SimpleNamespace(adapter_type="mock"),
+        celery_task_id=None,
+    )
+    commits = []
+    events = []
+    db = SimpleNamespace(
+        commit=lambda: commits.append("commit"),
+        refresh=lambda value: None,
+    )
+    response = Response(status_code=201)
+    monkeypatch.setattr(tasks_api, "get_owned_task", lambda *_: task)
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "ensure_user_task_capacity",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "create_retry_task",
+        lambda *_: retried,
+    )
+    monkeypatch.setattr(
+        tasks_api.agent_tasks.run_agent_task,
+        "delay",
+        lambda *_: SimpleNamespace(id="regular-retry-celery"),
+    )
+
+    async def record_event(value, name):
+        events.append((value.id, name))
+
+    monkeypatch.setattr(
+        tasks_api.task_service,
+        "broadcast_task_event",
+        record_event,
+    )
+
+    result = asyncio.run(
+        tasks_api.retry_task(
+            100,
+            response=response,
+            current_user=SimpleNamespace(id=1),
+            db=db,
+        )
+    )
+
+    assert result is retried
+    assert retried.celery_task_id == "regular-retry-celery"
+    assert response.status_code == 201
+    assert commits == ["commit"]
+    assert events == [(101, "task.created"), (101, "task.updated")]

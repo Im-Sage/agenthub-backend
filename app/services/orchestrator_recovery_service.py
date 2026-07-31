@@ -62,13 +62,44 @@ def _persist_recovery_failure(
     *,
     plan_status: str,
     status: TaskStatus | None = None,
+    expected_generation: int | None = None,
 ) -> None:
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
+        parent = db.scalar(
+            select(Task)
+            .where(Task.id == parent_task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if parent is None:
             return
         metadata = _metadata(parent)
-        generation = int(metadata.get("execution_generation", 0)) + 1
+        generation = int(metadata.get("execution_generation", 0))
+        if (
+            expected_generation is not None
+            and (
+                generation != expected_generation
+                or (
+                    status is not None
+                    and parent.status
+                    in (TaskStatus.CANCELLED, TaskStatus.CANCELLED.value)
+                )
+            )
+        ):
+            recovery_errors = metadata.get("recovery_errors")
+            if not isinstance(recovery_errors, list):
+                recovery_errors = []
+            recovery_errors.append(
+                {
+                    "plan_status": plan_status,
+                    "execution_generation": expected_generation,
+                    "error": error,
+                }
+            )
+            metadata["recovery_errors"] = recovery_errors
+            parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
+            db.commit()
+            return
         metadata["plan_status"] = plan_status
         parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
         parent.error_message = error
@@ -100,8 +131,14 @@ def _cleanup_safe_step_worktrees(parent_task_id: int) -> None:
 
 def cancel_orchestrator(parent_task_id: int) -> dict:
     revoke_ids: set[str] = set()
+    cancelled_generation: int | None = None
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
+        parent = db.scalar(
+            select(Task)
+            .where(Task.id == parent_task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if parent is None:
             return {"status": "failed", "error": "parent task not found"}
         metadata = _metadata(parent)
@@ -112,16 +149,31 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
         ):
             if task_id:
                 revoke_ids.add(str(task_id))
-        if parent.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        if parent.status not in (
+            TaskStatus.PENDING,
+            TaskStatus.PENDING.value,
+            TaskStatus.RUNNING,
+            TaskStatus.RUNNING.value,
+        ):
             return {"status": "conflict", "error": "task is terminal"}
-        metadata["execution_generation"] = int(
-            metadata.get("execution_generation", 0)
-        ) + 1
+        cancelled_generation = (
+            int(metadata.get("execution_generation", 0)) + 1
+        )
+        metadata["execution_generation"] = cancelled_generation
         parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
         now = datetime.now(UTC)
         parent.status = TaskStatus.CANCELLED
         parent.finished_at = now
-        for child in _children(db, parent.id):
+        children = list(
+            db.scalars(
+                select(Task)
+                .where(Task.parent_task_id == parent.id)
+                .order_by(Task.step_index.asc(), Task.id.asc())
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        for child in children:
             if child.celery_task_id:
                 revoke_ids.add(str(child.celery_task_id))
             if child.status in (
@@ -156,6 +208,7 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
             parent_task_id,
             json.dumps(errors, ensure_ascii=False),
             plan_status="cancellation_cleanup_failed",
+            expected_generation=cancelled_generation,
         )
     result = {
         "status": "cancelled",
@@ -171,8 +224,14 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
 def retry_failed_orchestrator(parent_task_id: int) -> str:
     from app.services import orchestrator_dispatch_service
 
+    generation = 0
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
+        parent = db.scalar(
+            select(Task)
+            .where(Task.id == parent_task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if parent is None:
             raise RuntimeError("parent task not found")
         if parent.status not in (
@@ -184,7 +243,15 @@ def retry_failed_orchestrator(parent_task_id: int) -> str:
             raise ValueError(
                 "Only FAILED or CANCELLED orchestrators can be retried"
             )
-        children = _children(db, parent.id)
+        children = list(
+            db.scalars(
+                select(Task)
+                .where(Task.parent_task_id == parent.id)
+                .order_by(Task.step_index.asc(), Task.id.asc())
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
         generation = int(_metadata(parent).get("execution_generation", 0)) + 1
         incomplete = [
             child
@@ -241,6 +308,7 @@ def retry_failed_orchestrator(parent_task_id: int) -> str:
             error,
             plan_status="retry_dispatch_failed",
             status=TaskStatus.FAILED,
+            expected_generation=generation,
         )
         raise RuntimeError(error)
     return str(result["canvas_id"])

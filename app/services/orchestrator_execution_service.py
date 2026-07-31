@@ -52,6 +52,74 @@ def _is_current_generation(parent: Task, expected_generation: int) -> bool:
     return _execution_generation(parent) == expected_generation
 
 
+_TERMINAL_TASK_STATUSES = {
+    TaskStatus.SUCCESS,
+    TaskStatus.SUCCESS.value,
+    TaskStatus.FAILED,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED,
+    TaskStatus.CANCELLED.value,
+}
+
+
+def _callback_barrier(
+    db,
+    parent_task_id: int,
+    expected_generation: int,
+    *,
+    lock: bool = False,
+    terminal_is_skip: bool = True,
+) -> tuple[Task | None, dict | None]:
+    statement = (
+        select(Task)
+        .where(Task.id == parent_task_id)
+        .execution_options(populate_existing=True)
+    )
+    if lock:
+        statement = statement.with_for_update()
+    parent = db.scalar(statement)
+    if parent is None:
+        return None, {
+            "status": "failed",
+            "error": "parent task not found",
+        }
+    if not _is_current_generation(parent, expected_generation):
+        return parent, {
+            "status": "skipped",
+            "reason": "stale execution",
+        }
+    if terminal_is_skip and parent.status in _TERMINAL_TASK_STATUSES:
+        return parent, {
+            "status": "skipped",
+            "reason": "parent is terminal",
+        }
+    return parent, None
+
+
+def _completed_callback_barrier(
+    db,
+    parent_task_id: int,
+    expected_generation: int,
+    *,
+    lock: bool = False,
+) -> tuple[Task | None, dict | None]:
+    parent, skipped = _callback_barrier(
+        db,
+        parent_task_id,
+        expected_generation,
+        lock=lock,
+        terminal_is_skip=False,
+    )
+    if skipped is not None:
+        return parent, skipped
+    if parent.status not in (TaskStatus.SUCCESS, TaskStatus.SUCCESS.value):
+        return parent, {
+            "status": "skipped",
+            "reason": "parent is terminal",
+        }
+    return parent, None
+
+
 def _repository(db, task: Task) -> Repository:
     conversation = db.get(Conversation, task.conversation_id)
     if conversation is None or conversation.repository_id is None:
@@ -82,11 +150,13 @@ def _children(db, parent_task_id: int) -> list[Task]:
 
 def prepare_execution(parent_task_id: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
-        if parent is None:
-            return {"status": "failed", "error": "parent task not found"}
-        if not _is_current_generation(parent, expected_generation):
-            return {"status": "skipped", "reason": "stale execution"}
+        parent, skipped = _callback_barrier(
+            db,
+            parent_task_id,
+            expected_generation,
+        )
+        if skipped is not None:
+            return skipped
         metadata = _metadata(parent)
         if metadata.get("integration_worktree_path"):
             return {"status": "prepared", **metadata}
@@ -96,12 +166,43 @@ def prepare_execution(parent_task_id: int, expected_generation: int = 0) -> dict
             )
             waves = build_execution_waves(plan.steps)
             repository = _repository(db, parent)
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+            )
+            if skipped is not None:
+                return skipped
             with _service(repository) as worktrees:
+                parent, skipped = _callback_barrier(
+                    db,
+                    parent_task_id,
+                    expected_generation,
+                )
+                if skipped is not None:
+                    return skipped
                 base = worktrees.resolve_base_commit()
+                parent, skipped = _callback_barrier(
+                    db,
+                    parent_task_id,
+                    expected_generation,
+                    lock=True,
+                )
+                if skipped is not None:
+                    return skipped
                 integration = worktrees.ensure_integration_worktree(
                     parent_task_id,
                     base,
                 )
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
+            metadata = _metadata(parent)
             metadata.update(
                 {
                     "plan_status": "dispatched",
@@ -127,11 +228,28 @@ def prepare_execution(parent_task_id: int, expected_generation: int = 0) -> dict
                     child.wave_index = wave.index
                     child.base_commit_hash = base
                     child.merge_status = "pending"
+                    child_metadata = _metadata(child)
+                    child_metadata["execution_generation"] = (
+                        expected_generation
+                    )
+                    child.metadata_json = json.dumps(
+                        child_metadata,
+                        ensure_ascii=False,
+                    )
             parent.status = TaskStatus.RUNNING
             parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
             db.commit()
             return {"status": "prepared", **metadata}
         except Exception as exc:
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
+            metadata = _metadata(parent)
             parent.status = TaskStatus.FAILED
             parent.error_message = str(exc)
             metadata["plan_status"] = "prepare_failed"
@@ -142,13 +260,13 @@ def prepare_execution(parent_task_id: int, expected_generation: int = 0) -> dict
 
 def prepare_wave(parent_task_id: int, wave_index: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
-        if parent is None:
-            return {"status": "failed", "error": "parent task not found"}
-        if not _is_current_generation(parent, expected_generation):
-            return {"status": "skipped", "reason": "stale execution"}
-        if parent.status in (TaskStatus.FAILED, TaskStatus.CANCELLED):
-            return {"status": "skipped", "reason": "parent is terminal"}
+        parent, skipped = _callback_barrier(
+            db,
+            parent_task_id,
+            expected_generation,
+        )
+        if skipped is not None:
+            return skipped
         metadata = _metadata(parent)
         try:
             repository = _repository(db, parent)
@@ -157,21 +275,55 @@ def prepare_wave(parent_task_id: int, wave_index: int, expected_generation: int 
                 for child in _children(db, parent.id)
                 if child.wave_index == wave_index
             ]
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+            )
+            if skipped is not None:
+                return skipped
             with _service(repository) as worktrees:
+                parent, skipped = _callback_barrier(
+                    db,
+                    parent_task_id,
+                    expected_generation,
+                )
+                if skipped is not None:
+                    return skipped
+                metadata = _metadata(parent)
                 integration_head = worktrees.resolve_base_commit(
                     metadata["integration_branch_name"]
                 )
+                prepared_children = []
                 for child in wave_children:
                     if child.status == TaskStatus.SUCCESS and child.result_commit_hash:
                         continue
+                    parent, skipped = _callback_barrier(
+                        db,
+                        parent_task_id,
+                        expected_generation,
+                        lock=True,
+                    )
+                    if skipped is not None:
+                        return skipped
                     handle = worktrees.ensure_step_worktree(
                         parent.id,
                         child.step_key,
                         integration_head,
                     )
-                    child.worktree_path = handle.path
-                    child.branch_name = handle.branch_name
-                    child.base_commit_hash = integration_head
+                    prepared_children.append((child, handle))
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
+            for child, handle in prepared_children:
+                child.worktree_path = handle.path
+                child.branch_name = handle.branch_name
+                child.base_commit_hash = integration_head
             db.commit()
             return {
                 "status": "prepared",
@@ -179,6 +331,14 @@ def prepare_wave(parent_task_id: int, wave_index: int, expected_generation: int 
                 "child_ids": [child.id for child in wave_children],
             }
         except Exception as exc:
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
             parent.status = TaskStatus.FAILED
             parent.error_message = str(exc)
             db.commit()
@@ -361,16 +521,26 @@ def execute_step(
 
 def merge_wave(parent_task_id: int, wave_index: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
-        if parent is None:
-            return {"status": "failed", "error": "parent task not found"}
-        if not _is_current_generation(parent, expected_generation):
-            return {"status": "skipped", "reason": "stale execution"}
+        parent, skipped = _callback_barrier(
+            db,
+            parent_task_id,
+            expected_generation,
+        )
+        if skipped is not None:
+            return skipped
         children = [
             child for child in _children(db, parent.id)
             if child.wave_index == wave_index
         ]
         if any(child.status == TaskStatus.FAILED for child in children):
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
             parent.status = TaskStatus.FAILED
             parent.error_message = f"Wave {wave_index} contains failed steps"
             db.commit()
@@ -383,16 +553,39 @@ def merge_wave(parent_task_id: int, wave_index: int, expected_generation: int = 
                 metadata["integration_branch_name"],
                 metadata["base_commit_hash"],
             )
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+            )
+            if skipped is not None:
+                return skipped
             with _service(repository) as worktrees:
                 for child in sorted(children, key=lambda item: item.step_index):
                     if child.merge_status == "merged":
                         continue
                     if child.result_commit_hash:
+                        parent, skipped = _callback_barrier(
+                            db,
+                            parent_task_id,
+                            expected_generation,
+                            lock=True,
+                        )
+                        if skipped is not None:
+                            return skipped
                         merged = worktrees.merge_step_commit(
                             integration,
                             child.result_commit_hash,
                         )
                         if not merged.success:
+                            parent, skipped = _callback_barrier(
+                                db,
+                                parent_task_id,
+                                expected_generation,
+                                lock=True,
+                            )
+                            if skipped is not None:
+                                return skipped
                             child.merge_status = "conflict"
                             child.error_message = json.dumps(
                                 list(merged.conflict_files)
@@ -404,14 +597,54 @@ def merge_wave(parent_task_id: int, wave_index: int, expected_generation: int = 
                                 "status": "conflict",
                                 "conflict_files": list(merged.conflict_files),
                             }
+                    parent, skipped = _callback_barrier(
+                        db,
+                        parent_task_id,
+                        expected_generation,
+                        lock=True,
+                    )
+                    if skipped is not None:
+                        return skipped
                     child.merge_status = (
                         "merged" if child.result_commit_hash else "skipped"
                     )
+                    parent, skipped = _callback_barrier(
+                        db,
+                        parent_task_id,
+                        expected_generation,
+                        lock=True,
+                    )
+                    if skipped is not None:
+                        return skipped
                     worktrees.remove_worktree(child.worktree_path)
+                    parent, skipped = _callback_barrier(
+                        db,
+                        parent_task_id,
+                        expected_generation,
+                        lock=True,
+                    )
+                    if skipped is not None:
+                        return skipped
                     worktrees.cleanup_step_branch(child.branch_name)
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
             db.commit()
             return {"status": "merged", "wave_index": wave_index}
         except Exception as exc:
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
             parent.status = TaskStatus.FAILED
             parent.error_message = str(exc)
             db.commit()
@@ -420,11 +653,14 @@ def merge_wave(parent_task_id: int, wave_index: int, expected_generation: int = 
 
 def finalize_execution(parent_task_id: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
-        if parent is None:
-            return {"status": "failed", "error": "parent task not found"}
-        if not _is_current_generation(parent, expected_generation):
-            return {"status": "skipped", "reason": "stale execution"}
+        parent, skipped = _callback_barrier(
+            db,
+            parent_task_id,
+            expected_generation,
+            terminal_is_skip=False,
+        )
+        if skipped is not None:
+            return skipped
         metadata = _metadata(parent)
         if metadata.get("code_change_id"):
             return {"status": "success", "code_change_id": metadata["code_change_id"]}
@@ -432,10 +668,32 @@ def finalize_execution(parent_task_id: int, expected_generation: int = 0) -> dic
             return {"status": str(parent.status), "error": parent.error_message}
         try:
             repository = _repository(db, parent)
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+            )
+            if skipped is not None:
+                return skipped
             with _service(repository) as worktrees:
+                parent, skipped = _callback_barrier(
+                    db,
+                    parent_task_id,
+                    expected_generation,
+                )
+                if skipped is not None:
+                    return skipped
+                metadata = _metadata(parent)
                 result = worktrees.resolve_base_commit(
                     metadata["integration_branch_name"]
                 )
+                parent, skipped = _callback_barrier(
+                    db,
+                    parent_task_id,
+                    expected_generation,
+                )
+                if skipped is not None:
+                    return skipped
                 diff = worktrees.diff_between(
                     metadata["integration_worktree_path"],
                     metadata["base_commit_hash"],
@@ -452,6 +710,15 @@ def finalize_execution(parent_task_id: int, expected_generation: int = 0) -> dic
                 raise RuntimeError(
                     verification.failure_summary or "Final verification failed"
                 )
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
+            metadata = _metadata(parent)
             code_change = asyncio.run(
                 repo_service.generate_code_change(
                     db,
@@ -463,6 +730,15 @@ def finalize_execution(parent_task_id: int, expected_generation: int = 0) -> dic
                     result_commit_hash=result,
                 )
             )
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
+            metadata = _metadata(parent)
             metadata["result_commit_hash"] = result
             metadata["code_change_id"] = code_change.id
             metadata["plan_status"] = "executed"
@@ -491,15 +767,55 @@ def finalize_execution(parent_task_id: int, expected_generation: int = 0) -> dic
             asyncio.run(
                 task_service.broadcast_agent_message(summary_message)
             )
+            parent, skipped = _completed_callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+            )
+            if skipped is not None:
+                return skipped
             with _service(repository) as worktrees:
                 for child in children:
                     if child.worktree_path:
+                        parent, skipped = _completed_callback_barrier(
+                            db,
+                            parent_task_id,
+                            expected_generation,
+                            lock=True,
+                        )
+                        if skipped is not None:
+                            return skipped
                         worktrees.remove_worktree(child.worktree_path)
                     if child.branch_name:
+                        parent, skipped = _completed_callback_barrier(
+                            db,
+                            parent_task_id,
+                            expected_generation,
+                            lock=True,
+                        )
+                        if skipped is not None:
+                            return skipped
                         worktrees.cleanup_step_branch(child.branch_name)
+                parent, skipped = _completed_callback_barrier(
+                    db,
+                    parent_task_id,
+                    expected_generation,
+                    lock=True,
+                )
+                if skipped is not None:
+                    return skipped
                 worktrees.prune()
             return {"status": "success", "code_change_id": code_change.id}
         except Exception as exc:
+            parent, skipped = _callback_barrier(
+                db,
+                parent_task_id,
+                expected_generation,
+                lock=True,
+            )
+            if skipped is not None:
+                return skipped
+            metadata = _metadata(parent)
             parent.status = TaskStatus.FAILED
             parent.error_message = str(exc)
             metadata["plan_status"] = "execution_failed"

@@ -23,6 +23,13 @@ class FakeSession:
         params = statement.compile().params
         return self.objects.get(next(iter(params.values())))
 
+    def scalars(self, statement):
+        return [
+            value
+            for value in self.objects.values()
+            if getattr(value, "parent_task_id", None) is not None
+        ]
+
     def commit(self):
         self.commits += 1
 
@@ -103,3 +110,209 @@ def test_finalizer_is_idempotent_after_code_change(monkeypatch):
 
 def test_utcnow_is_timezone_aware():
     assert service._utcnow().utcoffset() is not None
+
+
+def test_prepare_execution_treats_cancelled_parent_as_terminal_barrier(
+    monkeypatch,
+):
+    parent = SimpleNamespace(
+        id=10,
+        metadata_json=json.dumps(
+            {
+                "execution_generation": 2,
+                "plan": [
+                    {
+                        "id": "backend",
+                        "agent": "backend",
+                        "instruction": "Implement backend",
+                        "depends_on": [],
+                        "write_scope": ["app/**"],
+                    }
+                ],
+            }
+        ),
+        status=TaskStatus.CANCELLED,
+        error_message=None,
+    )
+    db = FakeSession({10: parent})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("terminal callback reached repository")
+        ),
+    )
+
+    result = service.prepare_execution(10, 2)
+
+    assert result == {"status": "skipped", "reason": "parent is terminal"}
+    assert db.commits == 0
+
+
+def _running_parent_for_barrier(metadata):
+    return SimpleNamespace(
+        id=10,
+        metadata_json=json.dumps(
+            {"execution_generation": 1, **metadata}
+        ),
+        status=TaskStatus.RUNNING,
+        error_message=None,
+        instruction="Implement backend",
+    )
+
+
+def _cancel_after_callback_entry(parent):
+    metadata = json.loads(parent.metadata_json)
+    metadata["execution_generation"] = 2
+    parent.metadata_json = json.dumps(metadata)
+    parent.status = TaskStatus.CANCELLED
+    return SimpleNamespace(id=1, user_id=1, local_path="repo")
+
+
+def test_prepare_execution_skips_when_cancel_wins_after_callback_entry(
+    monkeypatch,
+):
+    parent = _running_parent_for_barrier(
+        {
+            "plan": [
+                {
+                    "id": "backend",
+                    "agent": "backend",
+                    "instruction": "Implement backend",
+                    "depends_on": [],
+                    "write_scope": ["app/**"],
+                }
+            ]
+        }
+    )
+    child = SimpleNamespace(
+        id=11,
+        parent_task_id=10,
+        step_key="backend",
+    )
+    db = FakeSession({10: parent, 11: child})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: _cancel_after_callback_entry(parent),
+    )
+    monkeypatch.setattr(
+        service,
+        "_service",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("stale callback reached worktree side effect")
+        ),
+    )
+
+    result = service.prepare_execution(10, 1)
+
+    assert result == {"status": "skipped", "reason": "stale execution"}
+    assert db.commits == 0
+
+
+def test_prepare_wave_skips_when_retry_wins_after_callback_entry(
+    monkeypatch,
+):
+    parent = _running_parent_for_barrier(
+        {
+            "integration_branch_name": "agent/orchestrator-10/integration",
+        }
+    )
+    child = SimpleNamespace(
+        id=11,
+        parent_task_id=10,
+        wave_index=0,
+        status=TaskStatus.PENDING,
+    )
+    db = FakeSession({10: parent, 11: child})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: _cancel_after_callback_entry(parent),
+    )
+    monkeypatch.setattr(
+        service,
+        "_service",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("stale callback reached worktree side effect")
+        ),
+    )
+
+    result = service.prepare_wave(10, 0, 1)
+
+    assert result == {"status": "skipped", "reason": "stale execution"}
+    assert db.commits == 0
+
+
+def test_merge_wave_skips_when_cancel_wins_after_callback_entry(
+    monkeypatch,
+):
+    parent = _running_parent_for_barrier(
+        {
+            "integration_worktree_path": "integration",
+            "integration_branch_name": "agent/orchestrator-10/integration",
+            "base_commit_hash": "base",
+        }
+    )
+    child = SimpleNamespace(
+        id=11,
+        parent_task_id=10,
+        wave_index=0,
+        status=TaskStatus.SUCCESS,
+        step_index=0,
+        merge_status="ready",
+        result_commit_hash="commit",
+    )
+    db = FakeSession({10: parent, 11: child})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: _cancel_after_callback_entry(parent),
+    )
+    monkeypatch.setattr(
+        service,
+        "_service",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("stale callback reached worktree side effect")
+        ),
+    )
+
+    result = service.merge_wave(10, 0, 1)
+
+    assert result == {"status": "skipped", "reason": "stale execution"}
+    assert db.commits == 0
+
+
+def test_finalize_skips_when_retry_wins_after_callback_entry(
+    monkeypatch,
+):
+    parent = _running_parent_for_barrier(
+        {
+            "integration_worktree_path": "integration",
+            "integration_branch_name": "agent/orchestrator-10/integration",
+            "base_commit_hash": "base",
+        }
+    )
+    db = FakeSession({10: parent})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: _cancel_after_callback_entry(parent),
+    )
+    monkeypatch.setattr(
+        service,
+        "_service",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("stale callback reached worktree side effect")
+        ),
+    )
+
+    result = service.finalize_execution(10, 1)
+
+    assert result == {"status": "skipped", "reason": "stale execution"}
+    assert db.commits == 0

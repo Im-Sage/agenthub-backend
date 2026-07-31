@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_owned_task
@@ -155,6 +155,7 @@ retry_task 为重试任务的接口，主要逻辑如下：
 @router.post("/{task_id}/retry", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
 async def retry_task(
     task_id: int,
+    response: Response,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Task:
@@ -171,6 +172,7 @@ async def retry_task(
         db.expire_all()
         retried = get_owned_task(db, task_id, current_user.id)
         await task_service.broadcast_task_event(retried, "task.updated")
+        response.status_code = status.HTTP_202_ACCEPTED
         return retried
     # 2. 创建一个新的重试任务，并将其与原任务关联
     retry_task = task_service.create_retry_task(db, task)
