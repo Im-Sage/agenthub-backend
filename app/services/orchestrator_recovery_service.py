@@ -108,14 +108,41 @@ def _persist_recovery_failure(
         db.commit()
 
 
-def _cleanup_safe_step_worktrees(parent_task_id: int) -> None:
+def _cleanup_safe_step_worktrees(
+    parent_task_id: int,
+    cancelled_generation: int,
+) -> dict:
     with SessionLocal() as db:
-        parent = db.get(Task, parent_task_id)
+        parent = db.scalar(
+            select(Task)
+            .where(Task.id == parent_task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if parent is None:
-            return
+            return {"status": "skipped", "reason": "parent task not found"}
+        if (
+            parent.status
+            not in (TaskStatus.CANCELLED, TaskStatus.CANCELLED.value)
+            or int(_metadata(parent).get("execution_generation", 0))
+            != cancelled_generation
+        ):
+            return {
+                "status": "skipped",
+                "reason": "cancellation generation changed",
+            }
         repository = _repository(db, parent)
         with _service(repository) as worktrees:
-            for child in _children(db, parent.id):
+            children = list(
+                db.scalars(
+                    select(Task)
+                    .where(Task.parent_task_id == parent.id)
+                    .order_by(Task.step_index.asc(), Task.id.asc())
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            for child in children:
                 safe = (
                     child.celery_task_id is None
                     or child.merge_status == "merged"
@@ -127,6 +154,7 @@ def _cleanup_safe_step_worktrees(parent_task_id: int) -> None:
                 if child.branch_name:
                     worktrees.cleanup_step_branch(child.branch_name)
             worktrees.prune()
+        return {"status": "cleaned"}
 
 
 def cancel_orchestrator(parent_task_id: int) -> dict:
@@ -196,7 +224,10 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
         except Exception as exc:
             failed_revocations[task_id] = str(exc)
     try:
-        _cleanup_safe_step_worktrees(parent_task_id)
+        _cleanup_safe_step_worktrees(
+            parent_task_id,
+            cancelled_generation,
+        )
     except Exception as exc:
         cleanup_error = str(exc)
     if cleanup_error or failed_revocations:

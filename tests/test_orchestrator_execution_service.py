@@ -60,11 +60,16 @@ def test_prepare_execution_records_invalid_plan_failure(monkeypatch):
 
 
 def test_execute_step_business_failure_is_persisted_and_structured(monkeypatch):
-    parent = SimpleNamespace(id=10, status=TaskStatus.RUNNING)
+    parent = SimpleNamespace(
+        id=10,
+        status=TaskStatus.RUNNING,
+        metadata_json=json.dumps({"execution_generation": 1}),
+    )
     child = SimpleNamespace(
         id=11,
         parent_task_id=10,
         status=TaskStatus.PENDING,
+        metadata_json=json.dumps({"execution_generation": 1}),
         result_commit_hash=None,
         celery_task_id=None,
         started_at=None,
@@ -89,6 +94,111 @@ def test_execute_step_business_failure_is_persisted_and_structured(monkeypatch):
     assert child.error_message == "repository unavailable"
     assert child.celery_task_id == "celery-11"
     assert db.commits == 2
+
+
+def test_execute_step_old_generation_is_skipped_before_claim_side_effects(
+    monkeypatch,
+):
+    parent = SimpleNamespace(
+        id=10,
+        status=TaskStatus.RUNNING,
+        metadata_json=json.dumps({"execution_generation": 2}),
+    )
+    child = SimpleNamespace(
+        id=11,
+        parent_task_id=10,
+        status=TaskStatus.PENDING,
+        metadata_json=json.dumps({"execution_generation": 2}),
+        result_commit_hash=None,
+        celery_task_id=None,
+        started_at=None,
+    )
+    db = FakeSession({10: parent, 11: child})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("stale delivery reached repository side effects")
+        ),
+    )
+
+    outcome = service.execute_step(11, "old-step-id", 1)
+
+    assert outcome.status == "SKIPPED"
+    assert child.status == TaskStatus.PENDING
+    assert child.celery_task_id is None
+    assert child.started_at is None
+    assert db.commits == 0
+
+
+def test_execute_step_duplicate_running_delivery_does_not_repeat_agent(
+    monkeypatch,
+):
+    parent = SimpleNamespace(
+        id=10,
+        status=TaskStatus.RUNNING,
+        metadata_json=json.dumps({"execution_generation": 3}),
+    )
+    child = SimpleNamespace(
+        id=11,
+        parent_task_id=10,
+        status=TaskStatus.RUNNING,
+        metadata_json=json.dumps({"execution_generation": 3}),
+        result_commit_hash=None,
+        celery_task_id="stable-step-id",
+        started_at=service._utcnow(),
+    )
+    db = FakeSession({10: parent, 11: child})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("duplicate delivery repeated Agent execution")
+        ),
+    )
+
+    outcome = service.execute_step(11, "stable-step-id", 3)
+
+    assert outcome.status == "SKIPPED"
+    assert child.status == TaskStatus.RUNNING
+    assert child.celery_task_id == "stable-step-id"
+    assert db.commits == 0
+
+
+def test_execute_step_rejects_different_task_id_in_same_generation(
+    monkeypatch,
+):
+    parent = SimpleNamespace(
+        id=10,
+        status=TaskStatus.RUNNING,
+        metadata_json=json.dumps({"execution_generation": 3}),
+    )
+    child = SimpleNamespace(
+        id=11,
+        parent_task_id=10,
+        status=TaskStatus.RUNNING,
+        metadata_json=json.dumps({"execution_generation": 3}),
+        result_commit_hash=None,
+        celery_task_id="claimed-step-id",
+        started_at=service._utcnow(),
+    )
+    db = FakeSession({10: parent, 11: child})
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_repository",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("same-generation replacement repeated Agent")
+        ),
+    )
+
+    outcome = service.execute_step(11, "replacement-step-id", 3)
+
+    assert outcome.status == "SKIPPED"
+    assert child.celery_task_id == "claimed-step-id"
+    assert db.commits == 0
 
 
 def test_finalizer_is_idempotent_after_code_change(monkeypatch):

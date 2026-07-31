@@ -109,14 +109,22 @@ def test_verification_rejects_unowned_or_non_git_override(
 class FakeDb:
     def __init__(self):
         self.added = []
+        self.commits = 0
+        self.flushes = 0
+        self.refreshes = 0
 
     def add(self, value):
         self.added.append(value)
 
     def commit(self):
-        return None
+        self.commits += 1
+
+    def flush(self):
+        self.flushes += 1
+        self.added[-1].id = 1
 
     def refresh(self, value):
+        self.refreshes += 1
         value.id = 1
 
     def get(self, model, object_id):
@@ -173,4 +181,59 @@ def test_generate_code_change_reads_committed_range_without_checkout(
     assert "result.txt" in code_change.diff_text
     assert repo.active_branch.name == "agent/orchestrator-5/integration"
     assert repo.is_dirty(untracked_files=True) is False
+    assert db.commits == 1
+    assert db.flushes == 0
+    assert db.refreshes == 1
+    repo.close()
+
+
+def test_generate_code_change_can_flush_without_committing(
+    monkeypatch,
+    tmp_path,
+):
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    repo = Repo.init(repository_path)
+    with repo.config_writer() as config:
+        config.set_value("user", "name", "AgentHub")
+        config.set_value("user", "email", "agenthub@example.com")
+    (repository_path / "base.txt").write_text("base\n", encoding="utf-8")
+    repo.index.add(["base.txt"])
+    base = repo.index.commit("base").hexsha
+    repo.git.checkout("-b", "agent/orchestrator-6/integration")
+    (repository_path / "result.txt").write_text("result\n", encoding="utf-8")
+    repo.index.add(["result.txt"])
+    result = repo.index.commit("result").hexsha
+    task = SimpleNamespace(id=6, metadata_json=None)
+    repository = SimpleNamespace(
+        id=2,
+        local_path=str(repository_path),
+        repo_url="https://example.invalid/repo.git",
+    )
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.task_service.broadcast_task_log",
+        noop,
+    )
+    db = FakeDb()
+    code_change = asyncio.run(
+        repo_service.generate_code_change(
+            db,
+            task,
+            repository,
+            workspace_path=str(repository_path),
+            branch_name="agent/orchestrator-6/integration",
+            base_commit_hash=base,
+            result_commit_hash=result,
+            auto_commit=False,
+        )
+    )
+
+    assert code_change.id == 1
+    assert db.commits == 0
+    assert db.flushes == 1
+    assert db.refreshes == 0
     repo.close()

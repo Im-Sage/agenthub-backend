@@ -81,6 +81,7 @@ async def generate_code_change(
     branch_name: str | None = None,
     base_commit_hash: str | None = None,
     result_commit_hash: str | None = None,
+    auto_commit: bool = True,
 ) -> CodeChange:
     worktree_values = (
         workspace_path,
@@ -168,8 +169,11 @@ async def generate_code_change(
         status="generated",
     )
     db.add(code_change)
-    db.commit()
-    db.refresh(code_change)
+    if auto_commit:
+        db.commit()
+        db.refresh(code_change)
+    else:
+        db.flush()
     return code_change
 
 

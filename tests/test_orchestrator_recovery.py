@@ -97,7 +97,9 @@ def test_cancel_revokes_root_and_children_and_persists_soft_barrier(
     monkeypatch.setattr(
         service,
         "_cleanup_safe_step_worktrees",
-        lambda parent_id: cleaned.append(parent_id),
+        lambda parent_id, generation: cleaned.append(
+            (parent_id, generation)
+        ),
     )
 
     result = service.cancel_orchestrator(parent.id)
@@ -113,7 +115,7 @@ def test_cancel_revokes_root_and_children_and_persists_soft_barrier(
     assert children[1].status == TaskStatus.CANCELLED
     assert children[2].status == TaskStatus.SUCCESS
     assert db.commits == 1
-    assert cleaned == [100]
+    assert cleaned == [(100, 1)]
 
 
 def test_cancel_locks_and_refreshes_latest_parent_before_transition(
@@ -154,7 +156,11 @@ def test_cancel_locks_and_refreshes_latest_parent_before_transition(
         "revoke",
         lambda task_id, terminate: revoked.append(task_id),
     )
-    monkeypatch.setattr(service, "_cleanup_safe_step_worktrees", lambda _: None)
+    monkeypatch.setattr(
+        service,
+        "_cleanup_safe_step_worktrees",
+        lambda *_: None,
+    )
 
     result = service.cancel_orchestrator(latest_parent.id)
 
@@ -164,6 +170,74 @@ def test_cancel_locks_and_refreshes_latest_parent_before_transition(
     assert json.loads(latest_parent.metadata_json)["execution_generation"] == 8
     assert stale_parent.status == TaskStatus.RUNNING
     assert db.commits == 1
+
+
+def test_cancel_passes_cancelled_generation_to_safe_cleanup(monkeypatch):
+    parent = _parent(
+        TaskStatus.RUNNING,
+        {"execution_generation": 7},
+    )
+    db = FakeSession(parent)
+    cleanup_calls = []
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service,
+        "_cleanup_safe_step_worktrees",
+        lambda parent_id, generation: cleanup_calls.append(
+            (parent_id, generation)
+        )
+        or {"status": "cleaned"},
+    )
+
+    result = service.cancel_orchestrator(parent.id)
+
+    assert result["status"] == "cancelled"
+    assert cleanup_calls == [(100, 8)]
+
+
+def test_cancel_cleanup_skips_before_deletion_after_retry_generation(
+    monkeypatch,
+):
+    parent = _parent(
+        TaskStatus.RUNNING,
+        {"execution_generation": 9},
+    )
+    child = _child(
+        1,
+        TaskStatus.PENDING,
+        worktree_path="retry-worktree",
+        branch_name="retry-branch",
+    )
+    db = FakeSession(parent, [child])
+    removed = []
+
+    class Worktrees:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def remove_worktree(self, path):
+            removed.append(path)
+
+        def cleanup_step_branch(self, branch):
+            removed.append(branch)
+
+        def prune(self):
+            removed.append("prune")
+
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(service, "_repository", lambda *_: object())
+    monkeypatch.setattr(service, "_service", lambda _: Worktrees())
+
+    result = service._cleanup_safe_step_worktrees(parent.id, 8)
+
+    assert result == {
+        "status": "skipped",
+        "reason": "cancellation generation changed",
+    }
+    assert removed == []
 
 
 def test_retry_preserves_merged_steps_and_starts_first_incomplete_wave(
@@ -250,7 +324,7 @@ def test_cancel_persists_cleanup_failure(monkeypatch):
     monkeypatch.setattr(
         service,
         "_cleanup_safe_step_worktrees",
-        lambda parent_id: (_ for _ in ()).throw(
+        lambda parent_id, generation: (_ for _ in ()).throw(
             RuntimeError("worktree cleanup failed")
         ),
     )
@@ -410,7 +484,11 @@ def test_cancel_is_terminal_safe_and_revokes_each_id(monkeypatch):
         if task_id != "canvas-a"
         else (_ for _ in ()).throw(RuntimeError("revoke failed")),
     )
-    monkeypatch.setattr(service, "_cleanup_safe_step_worktrees", lambda _: None)
+    monkeypatch.setattr(
+        service,
+        "_cleanup_safe_step_worktrees",
+        lambda *_: None,
+    )
 
     result = service.cancel_orchestrator(parent.id)
 

@@ -357,12 +357,34 @@ def execute_step(
     expected_generation: int = 0,
 ) -> StepExecutionOutcome:
     with SessionLocal() as db:
-        child = db.get(Task, child_task_id)
+        child = db.scalar(
+            select(Task)
+            .where(Task.id == child_task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if child is None:
             return StepExecutionOutcome(
                 child_task_id, "FAILED", None, (), None, "child task not found"
             )
-        parent = db.get(Task, child.parent_task_id)
+        parent = db.scalar(
+            select(Task)
+            .where(Task.id == child.parent_task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if expected_generation == 0 and parent is not None:
+            expected_generation = _execution_generation(parent)
+        if (
+            parent is not None
+            and (
+                not _is_current_generation(parent, expected_generation)
+                or _execution_generation(child) != expected_generation
+            )
+        ):
+            return StepExecutionOutcome(
+                child.id, "SKIPPED", None, (), None, None
+            )
         if child.status == TaskStatus.SUCCESS and child.result_commit_hash:
             return StepExecutionOutcome(
                 child.id,
@@ -379,8 +401,13 @@ def execute_step(
             child.status = TaskStatus.CANCELLED
             db.commit()
             return StepExecutionOutcome(child.id, "CANCELLED", None, (), None, None)
-        if expected_generation == 0:
-            expected_generation = _execution_generation(parent)
+        if (
+            child.status in (TaskStatus.RUNNING, TaskStatus.RUNNING.value)
+            and child.celery_task_id
+        ):
+            return StepExecutionOutcome(
+                child.id, "SKIPPED", None, (), None, None
+            )
         child.celery_task_id = celery_task_id
         child.status = TaskStatus.RUNNING
         child.started_at = _utcnow()
@@ -525,13 +552,31 @@ def merge_wave(parent_task_id: int, wave_index: int, expected_generation: int = 
             db,
             parent_task_id,
             expected_generation,
+            lock=True,
         )
         if skipped is not None:
             return skipped
-        children = [
-            child for child in _children(db, parent.id)
-            if child.wave_index == wave_index
-        ]
+        children = list(
+            db.scalars(
+                select(Task)
+                .where(
+                    Task.parent_task_id == parent.id,
+                    Task.wave_index == wave_index,
+                )
+                .order_by(Task.step_index.asc(), Task.id.asc())
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        if children and all(
+            child.merge_status in ("merged", "skipped")
+            for child in children
+        ):
+            return {
+                "status": "merged",
+                "wave_index": wave_index,
+                "idempotent": True,
+            }
         if any(child.status == TaskStatus.FAILED for child in children):
             parent, skipped = _callback_barrier(
                 db,
@@ -562,7 +607,7 @@ def merge_wave(parent_task_id: int, wave_index: int, expected_generation: int = 
                 return skipped
             with _service(repository) as worktrees:
                 for child in sorted(children, key=lambda item: item.step_index):
-                    if child.merge_status == "merged":
+                    if child.merge_status in ("merged", "skipped"):
                         continue
                     if child.result_commit_hash:
                         parent, skipped = _callback_barrier(
@@ -728,8 +773,11 @@ def finalize_execution(parent_task_id: int, expected_generation: int = 0) -> dic
                     branch_name=metadata["integration_branch_name"],
                     base_commit_hash=metadata["base_commit_hash"],
                     result_commit_hash=result,
+                    auto_commit=False,
                 )
             )
+            if not _is_current_generation(parent, expected_generation):
+                return {"status": "skipped", "reason": "stale execution"}
             parent, skipped = _callback_barrier(
                 db,
                 parent_task_id,
