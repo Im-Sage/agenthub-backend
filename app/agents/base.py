@@ -39,5 +39,7 @@ class AgentRunResult(BaseModel):
 class AgentAdapter(ABC):
     @abstractmethod
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
-        raise NotImplementedError
+        raise RuntimeError(
+            "Concrete AgentAdapter classes must implement run()"
+        )
 
