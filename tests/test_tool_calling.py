@@ -15,6 +15,7 @@ from app.tools.base import (
     ToolCallResult,
     ToolDefinition,
     ToolRiskLevel,
+    ToolSource,
 )
 from app.tools.registry import tool_registry
 
@@ -121,6 +122,57 @@ def test_high_risk_delete_is_not_exposed(workspace_definitions):
 
     assert "workspace_delete_file" not in _model_tool_names(tools)
     assert "workspace_delete_file" not in reverse_map
+
+
+def test_dynamic_remote_tool_requires_explicit_agent_profile(monkeypatch):
+    definitions = [
+        _definition("workspace.read_file"),
+        ToolDefinition(
+            name="mcp.workspace.safe_search",
+            description="Search a remote knowledge source",
+            source=ToolSource.MCP,
+            server_id="workspace",
+            remote_name="safe_search",
+        ),
+        ToolDefinition(
+            name="mcp.workspace.admin",
+            description="Administrative remote operation",
+            risk_level=ToolRiskLevel.HIGH,
+            source=ToolSource.MCP,
+            server_id="workspace",
+            remote_name="admin",
+        ),
+    ]
+    monkeypatch.setattr(tool_registry, "list_tools", lambda: definitions)
+    monkeypatch.setattr(
+        "app.agents.tool_calling.settings.mcp_dynamic_agent_profiles_json",
+        "{}",
+    )
+
+    default_tools, _ = build_model_tools("backend", has_workspace=True)
+
+    monkeypatch.setattr(
+        "app.agents.tool_calling.settings.mcp_dynamic_agent_profiles_json",
+        '{"backend": ["mcp.workspace.safe_search", "mcp.workspace.admin"]}',
+    )
+    configured_tools, configured_reverse_map = build_model_tools(
+        "backend",
+        has_workspace=True,
+    )
+    reviewer_tools, _ = build_model_tools("reviewer", has_workspace=True)
+
+    assert _model_tool_names(default_tools) == {"workspace_read_file"}
+    assert _model_tool_names(configured_tools) == {
+        "workspace_read_file",
+        "mcp_workspace_safe_search",
+    }
+    assert configured_reverse_map["mcp_workspace_safe_search"] == (
+        "mcp.workspace.safe_search"
+    )
+    assert "mcp_workspace_admin" not in _model_tool_names(configured_tools)
+    assert "mcp_workspace_safe_search" not in _model_tool_names(
+        reviewer_tools
+    )
 
 
 def test_reviewer_cannot_write_or_rename(workspace_definitions):

@@ -1,5 +1,7 @@
 from celery import Celery
+from celery.signals import worker_process_init
 from app.core.config import settings
+from app.tools.bootstrap import initialize_tool_registry_sync
 
 # 初始化 Celery 实例
 # broker: 消息中间件（Redis）
@@ -13,6 +15,7 @@ celery_app = Celery(
     include=[
         "app.workers.agent_tasks",
         "app.workers.index_tasks",
+        "app.workers.orchestrator_tasks",
     ],
 )
 
@@ -32,6 +35,9 @@ celery_app.conf.update(
     #   → 任务执行完成
     #   → 再 ACK
     task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    task_track_started=True,
+    result_expires=86400,
     # 单个 worker 预取任务数
     worker_prefetch_multiplier=1,
     # Soft Time Limit 和 Hard Time Limit 都是 Celery 用来限制单个任务最大执行时间的，但处理方式不同。
@@ -40,3 +46,8 @@ celery_app.conf.update(
     # Hard Time Limit: 当任务执行时间超过这个限制时，Celery 会强制终止任务，不管任务是否完成清理操作。
     task_time_limit=settings.task_time_limit_seconds,
 )
+
+
+@worker_process_init.connect
+def initialize_worker_tools(**kwargs):
+    initialize_tool_registry_sync()

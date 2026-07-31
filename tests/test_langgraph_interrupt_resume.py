@@ -23,9 +23,13 @@ def initial_state(task_id: int = 42) -> dict:
         "current_agent": None,
         "current_instruction": None,
         "execution_results": [],
+        "verification_results": [],
+        "verification_attempts": 0,
         "errors": [],
         "awaiting_confirmation": False,
         "approval_status": None,
+        "execution_dispatched": False,
+        "canvas_id": None,
         "is_finished": False,
         "final_summary": None,
         "metadata_json": None,
@@ -35,9 +39,8 @@ def initial_state(task_id: int = 42) -> dict:
 def install_fake_workflow_nodes(monkeypatch):
     calls = {
         "planner": [],
-        "executor": [],
-        "verifier": [],
-        "summarizer": [],
+        "dispatcher": [],
+        "reject_plan": [],
     }
     plan = [{"agent": "backend", "instruction": "Implement durable HITL"}]
 
@@ -56,37 +59,26 @@ def install_fake_workflow_nodes(monkeypatch):
             "final_summary": None,
         }
 
-    async def fake_executor(state):
-        calls["executor"].append(state["task_id"])
+    async def fake_dispatcher(state):
+        calls["dispatcher"].append(state["task_id"])
         return {
-            "execution_results": [
-                {
-                    "step": state["current_step_index"],
-                    "content": "executed",
-                    "files": [],
-                }
-            ],
-            "errors": [],
-        }
-
-    async def fake_verifier(state):
-        calls["verifier"].append(state["task_id"])
-        return {
-            "current_step_index": 1,
-            "current_agent": None,
-            "current_instruction": None,
+            "execution_dispatched": True,
+            "canvas_id": f"canvas-{state['task_id']}",
             "is_finished": True,
             "errors": [],
         }
 
-    async def fake_summarizer(state):
-        calls["summarizer"].append(state["task_id"])
-        return {"final_summary": "workflow completed"}
+    async def fake_reject_plan(state):
+        calls["reject_plan"].append(state["task_id"])
+        return {
+            "is_finished": True,
+            "execution_dispatched": False,
+            "errors": [],
+        }
 
     monkeypatch.setattr(workflow, "plan_node", fake_planner)
-    monkeypatch.setattr(workflow, "execute_node", fake_executor)
-    monkeypatch.setattr(workflow, "verify_node", fake_verifier)
-    monkeypatch.setattr(workflow, "summarize_node", fake_summarizer)
+    monkeypatch.setattr(workflow, "dispatch_node", fake_dispatcher)
+    monkeypatch.setattr(workflow, "reject_plan_node", fake_reject_plan)
     return SimpleNamespace(calls=calls, plan=plan)
 
 
@@ -95,7 +87,9 @@ def test_agent_state_uses_messages_channel():
     assert "messgaes" not in AgentState.__annotations__
 
 
-def test_graph_interrupts_before_executor_and_resumes_same_thread(monkeypatch):
+def test_graph_interrupts_before_dispatcher_and_resumes_same_thread(
+    monkeypatch,
+):
     observed = install_fake_workflow_nodes(monkeypatch)
     graph = workflow.create_agent_graph(checkpointer=InMemorySaver())
     config = graph_config(42)
@@ -105,18 +99,18 @@ def test_graph_interrupts_before_executor_and_resumes_same_thread(monkeypatch):
     assert interrupted["__interrupt__"]
     assert interrupted["awaiting_confirmation"] is True
     assert observed.calls["planner"] == [42]
-    assert observed.calls["executor"] == []
+    assert observed.calls["dispatcher"] == []
 
     resumed = asyncio.run(
         graph.ainvoke(Command(resume={"approved": True}), config=config)
     )
 
     assert observed.calls["planner"] == [42]
-    assert observed.calls["executor"] == [42]
-    assert observed.calls["verifier"] == [42]
-    assert observed.calls["summarizer"] == [42]
+    assert observed.calls["dispatcher"] == [42]
+    assert observed.calls["reject_plan"] == []
     assert resumed["approval_status"] == "approved"
-    assert resumed["final_summary"] == "workflow completed"
+    assert resumed["execution_dispatched"] is True
+    assert resumed["canvas_id"] == "canvas-42"
 
 
 def test_different_thread_cannot_read_interrupted_task_state(monkeypatch):
@@ -130,7 +124,7 @@ def test_different_thread_cannot_read_interrupted_task_state(monkeypatch):
     assert other_thread.next == ()
 
 
-def test_rejected_approval_ends_without_executor(monkeypatch):
+def test_rejected_approval_ends_without_dispatcher(monkeypatch):
     observed = install_fake_workflow_nodes(monkeypatch)
     graph = workflow.create_agent_graph(checkpointer=InMemorySaver())
     config = graph_config(44)
@@ -142,8 +136,8 @@ def test_rejected_approval_ends_without_executor(monkeypatch):
 
     assert rejected["approval_status"] == "rejected"
     assert rejected["is_finished"] is True
-    assert observed.calls["executor"] == []
-    assert observed.calls["summarizer"] == []
+    assert observed.calls["dispatcher"] == []
+    assert observed.calls["reject_plan"] == [44]
 
 
 def test_workflow_does_not_expose_uncheckpointed_global_graph():

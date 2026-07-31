@@ -1,5 +1,4 @@
 import asyncio
-from types import SimpleNamespace
 
 from app.core import config
 
@@ -47,13 +46,9 @@ def test_graph_thread_ids_are_isolated_by_business_task():
     assert graph_thread_id(123) != graph_thread_id(124)
 
 
-def test_open_agent_graph_creates_parent_and_binds_checkpointer(
-    monkeypatch,
-    tmp_path,
-):
+def test_open_agent_graph_binds_factory_checkpointer(monkeypatch):
     from app.agents.graph import runtime
 
-    checkpoint_path = tmp_path / "nested" / "agenthub.sqlite3"
     checkpointer = object()
     compiled_graph = object()
     observed = {}
@@ -65,35 +60,21 @@ def test_open_agent_graph_creates_parent_and_binds_checkpointer(
         async def __aexit__(self, exc_type, exc, traceback):
             observed["closed"] = True
 
-    def fake_from_conn_string(connection_string):
-        observed["connection_string"] = connection_string
+    def fake_open_checkpointer():
         return FakeCheckpointerContext()
 
     def fake_create_agent_graph(*, checkpointer):
         observed["checkpointer"] = checkpointer
         return compiled_graph
 
-    monkeypatch.setattr(
-        runtime,
-        "settings",
-        SimpleNamespace(
-            resolved_langgraph_checkpoint_path=checkpoint_path.as_posix(),
-        ),
-    )
-    monkeypatch.setattr(
-        runtime.AsyncSqliteSaver,
-        "from_conn_string",
-        fake_from_conn_string,
-    )
+    monkeypatch.setattr(runtime, "open_checkpointer", fake_open_checkpointer)
     monkeypatch.setattr(runtime, "create_agent_graph", fake_create_agent_graph)
 
     async def exercise_runtime():
         async with runtime.open_agent_graph() as graph:
             assert graph is compiled_graph
-            assert checkpoint_path.parent.is_dir()
             assert observed["checkpointer"] is checkpointer
 
     asyncio.run(exercise_runtime())
 
-    assert observed["connection_string"] == checkpoint_path.as_posix()
     assert observed["closed"] is True

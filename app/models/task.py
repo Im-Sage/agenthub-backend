@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.user import Base
@@ -21,6 +21,20 @@ Task 模型表示一个任务，通常由一个 Agent 执行，
 """
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        Index("ix_tasks_parent_task_id", "parent_task_id"),
+        Index(
+            "ix_tasks_parent_step_key",
+            "parent_task_id",
+            "step_key",
+            unique=True,
+        ),
+        Index(
+            "ix_tasks_parent_wave_index",
+            "parent_task_id",
+            "wave_index",
+        ),
+    )
     """
     当你实例化这个模型时，该属性对应的 Python 类型是什么。
     例如，Mapped[int] 表示这个属性在 Python 代码中会被当作 int 类型处理
@@ -34,6 +48,16 @@ class Task(Base):
     instruction: Mapped[str] = mapped_column(Text, nullable=False)
     celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     depends_on: Mapped[str | None] = mapped_column(Text, nullable=True)  # 存储 JSON 数组，如 "[1, 2]"
+    step_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    step_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wave_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    write_scope_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    worktree_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    branch_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    base_commit_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_commit_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    merge_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    verification_result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # 存储任务元数据

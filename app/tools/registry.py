@@ -7,7 +7,13 @@ from app.core.logging import (
 )
 from app.core.config import settings
 from app.mcp.client import MCPToolClient
-from app.tools.base import ToolCallRequest, ToolCallResult, ToolDefinition, ToolRiskLevel
+from app.tools.base import (
+    ToolCallRequest,
+    ToolCallResult,
+    ToolDefinition,
+    ToolRiskLevel,
+    ToolSource,
+)
 
 
 ToolHandler = Callable[[ToolCallRequest], Awaitable[ToolCallResult]]
@@ -22,6 +28,8 @@ class ToolRegistry:
         self._definitions: dict[str, ToolDefinition] = {}
         # 存储工具的实际处理函数，供本地调用使用。
         self._handlers: dict[str, ToolHandler] = {}
+        # 存储 canonical 工具名到远程 MCP 精确路由的映射。
+        self._remote_routes: dict[str, ToolDefinition] = {}
 
     """
     当开发者注册一个新工具时，调用 register 方法将工具的定义和处理函数添加到注册表中。
@@ -32,9 +40,72 @@ class ToolRegistry:
     4. 将 handler 存储在 _handlers 字典中，以工具名称为键。
     5. 这样，系统就可以根据工具名称查找其定义和处理函数，并在调用时执行相应的逻辑。
     """
-    def register(self, definition: ToolDefinition, handler: ToolHandler) -> None:
+    def register(
+        self,
+        definition: ToolDefinition,
+        handler: ToolHandler | None = None,
+        *,
+        replace: bool = False,
+    ) -> None:
+        if definition.name in self._definitions and not replace:
+            if (
+                self._definitions[definition.name] == definition
+                and self._handlers.get(definition.name) is handler
+            ):
+                return
+            raise ValueError(f"Tool {definition.name} is already registered")
         self._definitions[definition.name] = definition
-        self._handlers[definition.name] = handler
+        if handler is None:
+            self._handlers.pop(definition.name, None)
+        else:
+            self._handlers[definition.name] = handler
+
+    def register_remote(self, definition: ToolDefinition) -> None:
+        if definition.source != ToolSource.MCP:
+            raise ValueError("Remote tool definition must use source=mcp")
+        if not definition.server_id:
+            raise ValueError("Remote tool definition requires server_id")
+        if not definition.remote_name:
+            raise ValueError("Remote tool definition requires remote_name")
+
+        current_route = self._remote_routes.get(definition.name)
+        if (
+            current_route is not None
+            and current_route.server_id != definition.server_id
+        ):
+            raise ValueError(
+                f"Tool {definition.name} is already routed by MCP server "
+                f"{current_route.server_id}"
+            )
+
+        self._remote_routes[definition.name] = definition
+        current_definition = self._definitions.get(definition.name)
+        if (
+            current_definition is None
+            or current_definition.source == ToolSource.MCP
+        ):
+            self._definitions[definition.name] = definition
+
+    def unregister_remote_source(self, server_id: str) -> int:
+        names = [
+            name
+            for name, route in self._remote_routes.items()
+            if route.server_id == server_id
+        ]
+        for name in names:
+            self._remote_routes.pop(name, None)
+            definition = self._definitions.get(name)
+            if (
+                definition is not None
+                and definition.source == ToolSource.MCP
+                and definition.server_id == server_id
+            ):
+                self._definitions.pop(name, None)
+                self._handlers.pop(name, None)
+        return len(names)
+
+    def remote_route(self, name: str) -> ToolDefinition | None:
+        return self._remote_routes.get(name)
 
     def list_tools(self) -> list[ToolDefinition]:
         return list(self._definitions.values())
@@ -122,7 +193,12 @@ class ToolRegistry:
             )
 
         client = MCPToolClient(settings.mcp_workspace_server_url, token=settings.mcp_internal_token)
-        mcp_name = self._to_mcp_tool_name(request.name)
+        route = self.remote_route(request.name)
+        mcp_name = (
+            route.remote_name
+            if route is not None and route.remote_name
+            else self._to_mcp_tool_name(request.name)
+        )
         arguments = {
             key: value
             for key, value in request.arguments.items()

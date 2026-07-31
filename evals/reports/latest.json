@@ -2,35 +2,15 @@
   "mode": "offline",
   "metrics": {
     "planner_schema_success_rate": 1.0,
-    "planner_fallback_rate": 0.05,
-    "retrieval_recall_at_5": 0.9333333333333333,
-    "retrieval_mrr": 0.8,
-    "context_truncation_rate": 0.05,
-    "tool_call_success_rate": 1.0,
-    "verification_pass_rate": 1.0,
-    "average_tool_rounds": 1.0
+    "planner_dag_validity_rate": 1.0,
+    "planner_scope_validity_rate": 1.0,
+    "planner_fallback_rate": 0.05
   },
   "gate_passed": true,
   "threshold_failures": [],
-  "failed_cases": [
-    {
-      "id": "retrieval-015",
-      "type": "retrieval",
-      "reason": "expected_path_not_in_top_5",
-      "expected": [
-        "app/agents/tool_calling.py"
-      ],
-      "actual": [
-        "app/tools/registry.py",
-        "app/tools/registry.py",
-        "app/agents/graph/nodes.py",
-        "app/agents/graph/nodes.py",
-        "app/__init__.py"
-      ]
-    }
-  ],
+  "failed_cases": [],
   "case_counts": {
-    "planner": 20,
-    "retrieval": 15
-  }
+    "planner": 20
+  },
+  "suite": "planner"
 }

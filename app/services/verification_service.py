@@ -7,6 +7,7 @@ from app.agents.graph.schemas import (
     VerificationResult,
 )
 from app.mcp.repository_resolver import RepositoryResolver
+from app.core.config import settings
 from app.core.logging import get_logger, log_agent_event
 from app.services.command_runner import CommandKind, CommandRunner
 
@@ -45,6 +46,7 @@ class VerificationService:
         user_id: int,
         changed_files: list[str],
         instruction: str,
+        workspace_path: str | None = None,
     ) -> VerificationResult:
         started = time.perf_counter()
 
@@ -78,7 +80,30 @@ class VerificationService:
             repository_id,
             user_id,
         )
-        workspace = Path(resolved.local_path)
+        owned_workspace = Path(resolved.local_path).resolve()
+        workspace = (
+            Path(workspace_path).resolve()
+            if workspace_path is not None
+            else owned_workspace
+        )
+        if workspace_path is not None:
+            allowed_root = (
+                Path(settings.resolved_agent_worktree_root).resolve()
+                / f"user-{user_id}"
+                / f"repo-{repository_id}"
+            )
+            if (
+                workspace != owned_workspace
+                and not workspace.is_relative_to(allowed_root)
+            ):
+                raise ValueError(
+                    "workspace_path is not within the owned repository "
+                    "or its AgentHub worktree root"
+                )
+            if not workspace.is_dir():
+                raise ValueError("workspace_path must be an existing directory")
+            if not (workspace / ".git").exists():
+                raise ValueError("workspace_path must contain a .git entry")
         normalized_files = [
             Path(path.replace("\\", "/"))
             for path in changed_files

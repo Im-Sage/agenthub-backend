@@ -20,9 +20,13 @@ def initial_state(task_id: int) -> dict:
         "current_agent": None,
         "current_instruction": None,
         "execution_results": [],
+        "verification_results": [],
+        "verification_attempts": 0,
         "errors": [],
         "awaiting_confirmation": False,
         "approval_status": None,
+        "execution_dispatched": False,
+        "canvas_id": None,
         "is_finished": False,
         "final_summary": None,
         "metadata_json": None,
@@ -32,9 +36,8 @@ def initial_state(task_id: int) -> dict:
 def install_fake_workflow_nodes(monkeypatch):
     calls = {
         "planner": [],
-        "executor": [],
-        "verifier": [],
-        "summarizer": [],
+        "dispatcher": [],
+        "reject_plan": [],
     }
 
     async def fake_planner(state):
@@ -57,37 +60,26 @@ def install_fake_workflow_nodes(monkeypatch):
             "final_summary": None,
         }
 
-    async def fake_executor(state):
-        calls["executor"].append(state["task_id"])
+    async def fake_dispatcher(state):
+        calls["dispatcher"].append(state["task_id"])
         return {
-            "execution_results": [
-                {
-                    "step": state["current_step_index"],
-                    "content": "resumed execution",
-                    "files": [],
-                }
-            ],
-            "errors": [],
-        }
-
-    async def fake_verifier(state):
-        calls["verifier"].append(state["task_id"])
-        return {
-            "current_step_index": 1,
-            "current_agent": None,
-            "current_instruction": None,
+            "execution_dispatched": True,
+            "canvas_id": f"canvas-{state['task_id']}",
             "is_finished": True,
             "errors": [],
         }
 
-    async def fake_summarizer(state):
-        calls["summarizer"].append(state["task_id"])
-        return {"final_summary": "resumed after checkpointer reopen"}
+    async def fake_reject_plan(state):
+        calls["reject_plan"].append(state["task_id"])
+        return {
+            "is_finished": True,
+            "execution_dispatched": False,
+            "errors": [],
+        }
 
     monkeypatch.setattr(workflow, "plan_node", fake_planner)
-    monkeypatch.setattr(workflow, "execute_node", fake_executor)
-    monkeypatch.setattr(workflow, "verify_node", fake_verifier)
-    monkeypatch.setattr(workflow, "summarize_node", fake_summarizer)
+    monkeypatch.setattr(workflow, "dispatch_node", fake_dispatcher)
+    monkeypatch.setattr(workflow, "reject_plan_node", fake_reject_plan)
     return SimpleNamespace(calls=calls)
 
 
@@ -112,7 +104,7 @@ def test_sqlite_checkpoint_resumes_after_saver_reopen(monkeypatch, tmp_path):
             assert interrupted["__interrupt__"]
             assert interrupted["awaiting_confirmation"] is True
             assert observed.calls["planner"] == [task_id]
-            assert observed.calls["executor"] == []
+            assert observed.calls["dispatcher"] == []
 
         async with AsyncSqliteSaver.from_conn_string(
             checkpoint_path
@@ -131,8 +123,8 @@ def test_sqlite_checkpoint_resumes_after_saver_reopen(monkeypatch, tmp_path):
     resumed = asyncio.run(exercise_reopen())
 
     assert observed.calls["planner"] == [task_id]
-    assert observed.calls["executor"] == [task_id]
-    assert observed.calls["verifier"] == [task_id]
-    assert observed.calls["summarizer"] == [task_id]
+    assert observed.calls["dispatcher"] == [task_id]
+    assert observed.calls["reject_plan"] == []
     assert resumed["approval_status"] == "approved"
-    assert resumed["final_summary"] == "resumed after checkpointer reopen"
+    assert resumed["execution_dispatched"] is True
+    assert resumed["canvas_id"] == f"canvas-{task_id}"

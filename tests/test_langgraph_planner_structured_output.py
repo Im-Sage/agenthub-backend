@@ -14,8 +14,11 @@ def test_orchestrator_plan_accepts_a_valid_plan():
     plan = OrchestratorPlan(
         steps=[
             PlanStep(
+                id="backend-plan",
                 agent="backend",
                 instruction="  Implement structured planning.  ",
+                depends_on=[],
+                write_scope=["app/agents/graph"],
             )
         ]
     )
@@ -47,6 +50,7 @@ class FakeStructuredLlm:
         self.responses = list(responses)
         self.schema = None
         self.calls = 0
+        self.messages = []
 
     def with_structured_output(self, schema):
         self.schema = schema
@@ -54,6 +58,7 @@ class FakeStructuredLlm:
 
     async def ainvoke(self, messages):
         self.calls += 1
+        self.messages.append(messages)
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -67,8 +72,11 @@ def test_generate_orchestrator_plan_retries_after_validation_failure():
             {
                 "steps": [
                     {
+                        "id": "review",
                         "agent": "reviewer",
                         "instruction": "Review the implementation",
+                        "depends_on": [],
+                        "write_scope": [],
                     }
                 ]
             },
@@ -81,11 +89,25 @@ def test_generate_orchestrator_plan_retries_after_validation_failure():
 
     assert llm.schema is OrchestratorPlan
     assert llm.calls == 2
+    system_prompt = str(llm.messages[0][0].content)
+    assert all(
+        field_name in system_prompt
+        for field_name in (
+            "id",
+            "agent",
+            "instruction",
+            "depends_on",
+            "write_scope",
+        )
+    )
     assert plan == OrchestratorPlan(
         steps=[
             PlanStep(
+                id="review",
                 agent="reviewer",
                 instruction="Review the implementation",
+                depends_on=[],
+                write_scope=[],
             )
         ]
     )
@@ -102,8 +124,11 @@ def test_generate_orchestrator_plan_falls_back_after_two_failures():
     assert plan == OrchestratorPlan(
         steps=[
             PlanStep(
+                id="step-1",
                 agent="backend",
                 instruction="Repair the backend",
+                depends_on=[],
+                write_scope=["**"],
             )
         ]
     )
@@ -115,8 +140,11 @@ def test_generate_orchestrator_plan_returns_first_valid_result():
             OrchestratorPlan(
                 steps=[
                     PlanStep(
+                        id="frontend",
                         agent="frontend",
                         instruction="Build the interface",
+                        depends_on=[],
+                        write_scope=["agenthub-frontend"],
                     )
                 ]
             )

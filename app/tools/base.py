@@ -8,6 +8,11 @@ class ToolRiskLevel(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
 
+
+class ToolSource(str, Enum):
+    LOCAL = "local"
+    MCP = "mcp"
+
 """
 ToolCallRequest是一个数据模型，表示调用工具的请求。它包含以下字段：
 - name: 工具的名称，类型为字符串。
@@ -45,3 +50,6 @@ class ToolDefinition(BaseModel):
     risk_level: ToolRiskLevel = ToolRiskLevel.LOW
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] | None = None
+    source: ToolSource = ToolSource.LOCAL
+    server_id: str | None = None
+    remote_name: str | None = None

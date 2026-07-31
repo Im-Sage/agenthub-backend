@@ -72,26 +72,70 @@ def generated_file_for_task(workspace_path: Path, task_id: int) -> Path:
     return generated_dir / f"task_{task_id}.md"
 
 
-async def generate_code_change(db: Session, task: Task, repository: Repository) -> CodeChange:
-    branch_name = f"agent-task-{task.id}"
+async def generate_code_change(
+    db: Session,
+    task: Task,
+    repository: Repository,
+    *,
+    workspace_path: str | None = None,
+    branch_name: str | None = None,
+    base_commit_hash: str | None = None,
+    result_commit_hash: str | None = None,
+    auto_commit: bool = True,
+) -> CodeChange:
+    worktree_values = (
+        workspace_path,
+        branch_name,
+        base_commit_hash,
+        result_commit_hash,
+    )
+    worktree_mode = all(value is not None for value in worktree_values)
+    if any(value is not None for value in worktree_values) and not worktree_mode:
+        raise ValueError(
+            "workspace_path, branch_name, base_commit_hash, and "
+            "result_commit_hash must be provided together"
+        )
+    branch_name = branch_name or f"agent-task-{task.id}"
     from app.services import task_service
     
     try:
-        # 1. 确保在正确的分支（不执行 reset，保留 Agent 的修改）
         from git import Repo
-        repo = Repo(repository.local_path)
-        
-        await task_service.broadcast_task_log(task, f"Preparing branch: {branch_name}")
-        repo.git.checkout('-B', branch_name)
-        
-        # 将所有新文件和修改加入暂存区，确保后续的 Diff 和 Changed files 能捕捉到
-        await task_service.broadcast_task_log(task, "Staging files for diff...")
-        repo.git.add(A=True)
-
-        # 2. 获取变更文件列表和差异
-        changed_files = workspace_service.get_changed_files(repository.local_path)
-        diff_text = workspace_service.get_diff(repository.local_path)
-        commit_hash = workspace_service.get_commit_hash(repository.local_path)
+        if worktree_mode:
+            with Repo(workspace_path) as repo:
+                repo.commit(base_commit_hash)
+                repo.commit(result_commit_hash)
+                revision_range = (
+                    f"{base_commit_hash}..{result_commit_hash}"
+                )
+                changed_files = [
+                    line
+                    for line in repo.git.diff(
+                        "--name-only",
+                        revision_range,
+                    ).splitlines()
+                    if line
+                ]
+                diff_text = repo.git.diff(revision_range)
+                commit_hash = result_commit_hash
+        else:
+            with Repo(repository.local_path) as repo:
+                await task_service.broadcast_task_log(
+                    task,
+                    f"Preparing branch: {branch_name}",
+                )
+                repo.git.checkout("-B", branch_name)
+                await task_service.broadcast_task_log(
+                    task,
+                    "Staging files for diff...",
+                )
+                repo.git.add(A=True)
+            changed_files = workspace_service.get_changed_files(
+                repository.local_path
+            )
+            diff_text = workspace_service.get_diff(repository.local_path)
+            commit_hash = workspace_service.get_commit_hash(
+                repository.local_path
+            )
         await task_service.broadcast_task_log(task, f"Diff captured for {len(changed_files)} files.")
     except WorkspaceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -125,8 +169,11 @@ async def generate_code_change(db: Session, task: Task, repository: Repository) 
         status="generated",
     )
     db.add(code_change)
-    db.commit()
-    db.refresh(code_change)
+    if auto_commit:
+        db.commit()
+        db.refresh(code_change)
+    else:
+        db.flush()
     return code_change
 
 
@@ -147,17 +194,31 @@ async def create_pull_request_from_code_change(
     try:
         # 1. 直接提交变更（因为 generate 阶段已经写好文件并 add 过了，千万不要再 reset）
         from git import Repo, GitCommandError
-        repo = Repo(repository.local_path)
-        try:
-            repo.git.checkout(code_change.branch_name)
-        except GitCommandError:
-            # 如果分支不存在，可能是被清理了，尝试创建并切换
-            repo.git.checkout('-B', code_change.branch_name)
-        
-        # 由于这是同步上下文中的调用（例如从 run_agent_task），如果是 async 方法需要 await
-        # 但如果是从 API 直接调用（如 pull_requests.py），也需要是 async。
-        # 统一改为 async 并加上 task 记录（如果有）
-        commit_hash = await workspace_service.commit_changes(repository.local_path, title)
+        with Repo(repository.local_path) as repo:
+            try:
+                branch_commit = repo.commit(
+                    code_change.branch_name
+                ).hexsha
+            except Exception:
+                branch_commit = None
+            already_committed = (
+                bool(code_change.commit_hash)
+                and branch_commit == code_change.commit_hash
+            )
+            if not already_committed:
+                try:
+                    repo.git.checkout(code_change.branch_name)
+                except GitCommandError:
+                    repo.git.checkout("-B", code_change.branch_name)
+
+        commit_hash = (
+            code_change.commit_hash
+            if already_committed
+            else await workspace_service.commit_changes(
+                repository.local_path,
+                title,
+            )
+        )
         
         # 2. 推送分支到远程仓库
         await workspace_service.push_branch(repository.local_path, code_change.branch_name)

@@ -18,10 +18,7 @@ from app.api import (
 )
 from app.core.config import PROJECT_ROOT, settings
 from app.db import base  # noqa: F401
-from app.tools import register_builtin_tools
-
-# 注册内置工具
-register_builtin_tools()
+from app.tools.bootstrap import initialize_tool_registry
 from app.core.broadcaster import broadcaster
 from app.core.errors import install_error_handlers
 from app.core.logging import RequestLoggingMiddleware, configure_logging
@@ -34,11 +31,14 @@ configure_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await initialize_tool_registry()
     # 启动时：开始订阅 Redis 频道
     await broadcaster.subscribe("conv_*", websocket_manager.broadcast_json)
-    yield
-    # 关闭时：清理连接
-    await broadcaster.stop()
+    try:
+        yield
+    finally:
+        # 关闭时：清理连接
+        await broadcaster.stop()
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 install_error_handlers(app)

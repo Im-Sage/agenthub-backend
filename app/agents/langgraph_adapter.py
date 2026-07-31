@@ -25,6 +25,8 @@ class LangGraphOrchestratorAdapter(AgentAdapter):
             "errors": [],
             "awaiting_confirmation": False,
             "approval_status": None,
+            "execution_dispatched": False,
+            "canvas_id": None,
             "is_finished": False,
             "final_summary": None,
             "metadata_json": None
@@ -93,6 +95,21 @@ class LangGraphOrchestratorAdapter(AgentAdapter):
                 ),
                 changed_files=[],
                 logs="LangGraph interrupted for human approval.",
+            )
+        if final_state.get("execution_dispatched"):
+            canvas_id = final_state.get("canvas_id")
+            return AgentRunResult(
+                status="dispatched",
+                summary="Orchestrator execution dispatched to Celery.",
+                changed_files=[],
+                logs=f"Celery canvas id: {canvas_id}",
+            )
+        if final_state.get("approval_status") == "rejected":
+            return AgentRunResult(
+                status="cancelled",
+                summary="Orchestrator plan rejected by user.",
+                changed_files=[],
+                logs="LangGraph plan rejected before execution.",
             )
 
         all_changed_files = []

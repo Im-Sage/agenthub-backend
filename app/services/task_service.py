@@ -236,9 +236,21 @@ def create_subtask(
     agent_code: str,
     instruction: str,
     task_type: str | None = None,
-    depends_on: list[int] | None = None,
+    depends_on: list[str] | None = None,
+    step_key: str | None = None,
+    step_index: int | None = None,
+    write_scope: list[str] | None = None,
 ) -> Task:
     agent = get_or_create_agent(db, agent_code)
+    step_metadata = (
+        {
+            "step_key": step_key,
+            "step_index": step_index,
+            "write_scope": list(write_scope or []),
+        }
+        if step_key is not None
+        else None
+    )
     child_task = Task(
         conversation_id=parent_task.conversation_id,
         parent_task_id=parent_task.id,
@@ -246,7 +258,23 @@ def create_subtask(
         status=TaskStatus.PENDING,
         instruction=instruction,
         task_type=task_type,
-        depends_on=json.dumps(depends_on) if depends_on else None,
+        depends_on=(
+            json.dumps(depends_on)
+            if depends_on is not None
+            else None
+        ),
+        step_key=step_key,
+        step_index=step_index,
+        write_scope_json=(
+            json.dumps(write_scope, ensure_ascii=False)
+            if write_scope is not None
+            else None
+        ),
+        metadata_json=(
+            json.dumps(step_metadata, ensure_ascii=False)
+            if step_metadata is not None
+            else None
+        ),
     )
     db.add(child_task)
     db.commit()
@@ -305,6 +333,28 @@ def get_orchestrator_plan(task: Task) -> dict:
         "plan": metadata.get("plan", []),
         "child_ids": metadata.get("child_ids", []),
     }
+
+
+def is_orchestrator_task(task: Task) -> bool:
+    metadata = get_task_metadata(task)
+    plan = metadata.get("plan")
+    execution_statuses = {
+        "dispatched", "dispatch_queued", "retrying", "prepare_failed",
+        "dispatch_failed", "execution_failed", "verification_failed",
+        "executed",
+    }
+    if (
+        metadata.get("execution_generation") is None
+        and metadata.get("plan_status") not in execution_statuses
+    ):
+        return False
+    if not isinstance(plan, list) or not plan:
+        return False
+    return all(
+        isinstance(step, dict)
+        and all(key in step for key in ("id", "agent", "instruction"))
+        for step in plan
+    )
 
 
 def confirm_orchestrator_plan(db: Session, task: Task) -> Task:

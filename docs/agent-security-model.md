@@ -43,6 +43,17 @@ CommandRunner 不提供通用 shell。可用能力是 pytest、Ruff、mypy，以
 
 Agent profile 是 deny-by-default allowlist。backend、frontend、reviewer 和 qwen 只看到完成职责所需的工具。高风险工具需要运行时确认；未授权或需确认的工具不会因 prompt 指令而放宽。
 
+MCP 动态发现同样不改变这一原则。`tools/list` 返回值是不可信输入：名称和 JSON
+Schema 必须校验，`local_path/repository_id/user_id/worktree_path` 会被清除，
+delete/remove/rm/shell/exec 类工具默认拒绝。注册 remote route 只表示 Registry
+能够寻址它，不表示模型已获授权；未知 namespaced 工具还必须出现在
+`MCP_DYNAMIC_AGENT_PROFILES_JSON` 的对应角色中，HIGH 风险继续不可见。
+
+Orchestrator 并行执行使用独立 Worktree，而不是共享 Workspace。隔离避免一个 Agent
+覆盖另一个 Agent 的未提交内容；每步独立 commit，integration branch 按确定顺序
+cherry-pick，冲突 abort 且写入数据库。取消 generation barrier 和幂等 claim 阻止旧
+callback 或重复投递越过 HITL/取消边界。
+
 本文档中的 “HUMAN GATE” 需区分两个层面：
 
 - 实施计划所说“不设置 HUMAN GATE”，是指 Codex 执行本项目任务时不得把本可自动完成的实施工作转交给用户。

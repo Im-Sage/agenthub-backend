@@ -3,7 +3,7 @@ uvicorn[standard]==0.34.0
 sqlalchemy==2.0.36
 alembic==1.14.0
 pydantic-settings==2.7.1
-celery
+celery==5.6.3
 redis
 GitPython
 PyGithub
@@ -19,3 +19,5 @@ numpy>=2.1,<3
 langgraph
 langchain-openai
 langgraph-checkpoint-sqlite
+langgraph-checkpoint-postgres==3.1.0
+psycopg[binary,pool]>=3.2,<4

@@ -41,6 +41,8 @@ def reciprocal_rank(
 
 OFFLINE_THRESHOLDS = {
     "planner_schema_success_rate": ("eq", 1.0),
+    "planner_dag_validity_rate": ("eq", 1.0),
+    "planner_scope_validity_rate": ("eq", 1.0),
     "retrieval_recall_at_5": ("min", 0.80),
     "context_truncation_rate": ("max", 0.30),
     "tool_call_success_rate": ("eq", 1.0),
@@ -48,9 +50,15 @@ OFFLINE_THRESHOLDS = {
 }
 
 
-def threshold_failures(metrics: dict[str, float]) -> list[str]:
+def threshold_failures(
+    metrics: dict[str, float],
+    *,
+    required_metrics: set[str] | None = None,
+) -> list[str]:
     failures: list[str] = []
     for name, (operator, threshold) in OFFLINE_THRESHOLDS.items():
+        if required_metrics is not None and name not in required_metrics:
+            continue
         value = metrics.get(name)
         if value is None:
             failures.append(f"{name}: missing")

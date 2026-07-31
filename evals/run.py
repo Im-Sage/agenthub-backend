@@ -137,15 +137,64 @@ def fake_structured_plan(instruction: str) -> OrchestratorPlan:
         agents.append("reviewer")
     if not agents:
         agents.append("backend")
-    return OrchestratorPlan(
-        steps=[
+    steps: list[PlanStep] = []
+    for index, agent in enumerate(dict.fromkeys(agents), start=1):
+        prior_step_ids = [step.id for step in steps]
+        write_scope = {
+            "backend": ["app", "tests"],
+            "frontend": ["agenthub-frontend"],
+            "reviewer": [],
+        }[agent]
+        steps.append(
             PlanStep(
+                id=f"{agent}-{index}",
                 agent=agent,
                 instruction=instruction.strip() or "Handle the user request.",
+                depends_on=(
+                    prior_step_ids
+                    if agent == "reviewer"
+                    else []
+                ),
+                write_scope=write_scope,
             )
-            for agent in dict.fromkeys(agents)
+        )
+    return OrchestratorPlan(steps=steps)
+
+
+def planner_dag_is_valid(plan: OrchestratorPlan) -> bool:
+    step_ids = [step.id for step in plan.steps]
+    if len(step_ids) != len(set(step_ids)):
+        return False
+    known = set(step_ids)
+    completed: set[str] = set()
+    remaining = list(plan.steps)
+    while remaining:
+        ready = [
+            step
+            for step in remaining
+            if set(step.depends_on) <= completed
         ]
-    )
+        if not ready:
+            return False
+        for step in ready:
+            if any(dependency not in known for dependency in step.depends_on):
+                return False
+            completed.add(step.id)
+            remaining.remove(step)
+    return True
+
+
+def planner_scopes_are_valid(plan: OrchestratorPlan) -> bool:
+    for step in plan.steps:
+        try:
+            validated = PlanStep.model_validate(step.model_dump())
+        except Exception:
+            return False
+        if validated.write_scope != step.write_scope:
+            return False
+        if any("\\" in scope for scope in step.write_scope):
+            return False
+    return True
 
 
 async def retrieval_results(cases: list[dict]) -> list[dict]:
@@ -208,10 +257,12 @@ async def retrieval_results(cases: list[dict]) -> list[dict]:
         return results
 
 
-async def run_offline() -> dict:
+async def run_offline(suite: str | None = None) -> dict:
     planner_cases = load_jsonl(CASES_ROOT / "planner_cases.jsonl")
-    retrieval_cases = load_jsonl(
-        CASES_ROOT / "retrieval_cases.jsonl"
+    retrieval_cases = (
+        []
+        if suite == "planner"
+        else load_jsonl(CASES_ROOT / "retrieval_cases.jsonl")
     )
     planner_results: list[dict] = []
     planner = FakeStructuredPlanner()
@@ -221,9 +272,13 @@ async def run_offline() -> dict:
             plan = planner.invoke(case["instruction"])
             schema_success = True
             actual_agents = [step.agent for step in plan.steps]
+            dag_valid = planner_dag_is_valid(plan)
+            scope_valid = planner_scopes_are_valid(plan)
         except Exception as exc:
             schema_success = False
             actual_agents = []
+            dag_valid = False
+            scope_valid = False
             fallback = True
             fallback_reason = type(exc).__name__
         else:
@@ -232,6 +287,8 @@ async def run_offline() -> dict:
             {
                 "case": case,
                 "schema_success": schema_success,
+                "dag_valid": dag_valid,
+                "scope_valid": scope_valid,
                 "fallback": fallback,
                 "fallback_reason": fallback_reason,
                 "actual_agents": actual_agents,
@@ -272,20 +329,31 @@ async def run_offline() -> dict:
         "planner_schema_success_rate": success_rate(
             result["schema_success"] for result in planner_results
         ),
+        "planner_dag_validity_rate": success_rate(
+            result["dag_valid"] for result in planner_results
+        ),
+        "planner_scope_validity_rate": success_rate(
+            result["scope_valid"] for result in planner_results
+        ),
         "planner_fallback_rate": success_rate(
             result["fallback"] for result in planner_results
         ),
-        "retrieval_recall_at_5": average(recall_values),
-        "retrieval_mrr": average(reciprocal_ranks),
-        "context_truncation_rate": success_rate(context_truncated),
-        "tool_call_success_rate": success_rate(tool_outcomes),
-        "verification_pass_rate": success_rate(
-            verification_outcomes
-        ),
-        "average_tool_rounds": average(
-            1.0 for _ in planner_cases
-        ),
     }
+    if suite != "planner":
+        metrics.update(
+            {
+                "retrieval_recall_at_5": average(recall_values),
+                "retrieval_mrr": average(reciprocal_ranks),
+                "context_truncation_rate": success_rate(context_truncated),
+                "tool_call_success_rate": success_rate(tool_outcomes),
+                "verification_pass_rate": success_rate(
+                    verification_outcomes
+                ),
+                "average_tool_rounds": average(
+                    1.0 for _ in planner_cases
+                ),
+            }
+        )
     failed_cases: list[dict] = []
     for result in planner_results:
         case = result["case"]
@@ -295,7 +363,16 @@ async def run_offline() -> dict:
             <= result["step_count"]
             <= case["max_steps"]
         )
-        if result["actual_agents"] != expected_agents or not valid_steps:
+        valid_dag = result["dag_valid"] == case["expect_dag_valid"]
+        valid_scopes = (
+            result["scope_valid"] == case["expect_scope_valid"]
+        )
+        if (
+            result["actual_agents"] != expected_agents
+            or not valid_steps
+            or not valid_dag
+            or not valid_scopes
+        ):
             failed_cases.append(
                 {
                     "id": case["id"],
@@ -310,10 +387,14 @@ async def run_offline() -> dict:
                             case["min_steps"],
                             case["max_steps"],
                         ],
+                        "dag_valid": case["expect_dag_valid"],
+                        "scope_valid": case["expect_scope_valid"],
                     },
                     "actual": {
                         "agents": result["actual_agents"],
                         "steps": result["step_count"],
+                        "dag_valid": result["dag_valid"],
+                        "scope_valid": result["scope_valid"],
                     },
                 }
             )
@@ -328,21 +409,37 @@ async def run_offline() -> dict:
                     "actual": result["actual_paths"],
                 }
             )
-    failures = threshold_failures(metrics)
+    required_metrics = (
+        {
+            "planner_schema_success_rate",
+            "planner_dag_validity_rate",
+            "planner_scope_validity_rate",
+        }
+        if suite == "planner"
+        else None
+    )
+    failures = threshold_failures(
+        metrics,
+        required_metrics=required_metrics,
+    )
+    case_counts = {"planner": len(planner_cases)}
+    if suite != "planner":
+        case_counts["retrieval"] = len(retrieval_cases)
     return {
         "mode": "offline",
         "metrics": metrics,
         "gate_passed": not failures,
         "threshold_failures": failures,
         "failed_cases": failed_cases,
-        "case_counts": {
-            "planner": len(planner_cases),
-            "retrieval": len(retrieval_cases),
-        },
+        "case_counts": case_counts,
     }
 
 
-async def run_evaluation(mode: str) -> dict:
+async def run_evaluation(
+    mode: str,
+    *,
+    suite: str | None = None,
+) -> dict:
     if mode == "live" and not (
         os.getenv("ALIYUN_API_KEY") or os.getenv("EMBEDDING_API_KEY")
     ):
@@ -355,8 +452,10 @@ async def run_evaluation(mode: str) -> dict:
             "threshold_failures": [],
             "failed_cases": [],
         }
-    report = await run_offline()
+    report = await run_offline(suite=suite)
     report["mode"] = mode
+    if suite is not None:
+        report["suite"] = suite
     return report
 
 
@@ -368,11 +467,18 @@ def main(argv: list[str] | None = None) -> int:
         default="offline",
     )
     parser.add_argument(
+        "--suite",
+        choices=("planner",),
+        default=None,
+    )
+    parser.add_argument(
         "--output",
         default="evals/reports/latest.json",
     )
     args = parser.parse_args(argv)
-    report = asyncio.run(run_evaluation(args.mode))
+    report = asyncio.run(
+        run_evaluation(args.mode, suite=args.suite)
+    )
     log_agent_event(
         logger,
         "eval.completed",
