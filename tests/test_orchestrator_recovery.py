@@ -207,7 +207,10 @@ def test_cancel_persists_cleanup_failure(monkeypatch):
     assert result["status"] == "cancelled"
     assert result["cleanup_error"] == "worktree cleanup failed"
     assert parent.status == TaskStatus.CANCELLED
-    assert parent.error_message == "worktree cleanup failed"
+    assert json.loads(parent.error_message) == {
+        "cleanup_error": "worktree cleanup failed",
+        "failed_revocations": {},
+    }
     assert db.commits == 2
 
 

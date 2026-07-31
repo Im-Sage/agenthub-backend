@@ -19,6 +19,10 @@ class FakeSession:
     def get(self, model, object_id):
         return self.objects.get(object_id)
 
+    def scalar(self, statement):
+        params = statement.compile().params
+        return self.objects.get(next(iter(params.values())))
+
     def commit(self):
         self.commits += 1
 
