@@ -10,6 +10,7 @@ from app.models.user import User
 from app.schemas.task import TaskPlanRead, TaskRead
 from app.schemas.enums import TaskStatus
 from app.services import task_service
+from app.services import orchestrator_recovery_service
 from app.workers import agent_tasks
 from app.workers.celery_app import celery_app
 
@@ -85,6 +86,18 @@ async def cancel_task(
     db: Session = Depends(get_db),
 ) -> Task:
     task = get_owned_task(db, task_id, current_user.id)
+
+    if task.parent_task_id is None and task_service.is_orchestrator_task(task):
+        result = orchestrator_recovery_service.cancel_orchestrator(task.id)
+        if result.get("status") != "cancelled":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error") or "Unable to cancel orchestrator",
+            )
+        db.expire_all()
+        task = get_owned_task(db, task_id, current_user.id)
+        await task_service.broadcast_task_event(task, "task.updated")
+        return task
     
     if task.status not in [TaskStatus.PENDING, TaskStatus.RUNNING]:
         raise HTTPException(
@@ -148,6 +161,12 @@ async def retry_task(
     # 1. 验证用户是否有权限访问指定的任务,task_id 是要重试的任务的 ID，current_user 是当前登录的用户，db 是数据库会话
     task = get_owned_task(db, task_id, current_user.id)
     task_service.ensure_user_task_capacity(db, current_user.id)
+    if task.parent_task_id is None and task_service.is_orchestrator_task(task):
+        orchestrator_recovery_service.retry_failed_orchestrator(task.id)
+        db.expire_all()
+        retried = get_owned_task(db, task_id, current_user.id)
+        await task_service.broadcast_task_event(retried, "task.updated")
+        return retried
     # 2. 创建一个新的重试任务，并将其与原任务关联
     retry_task = task_service.create_retry_task(db, task)
     await task_service.broadcast_task_event(retry_task, "task.created")
@@ -162,3 +181,37 @@ async def retry_task(
     db.refresh(retry_task)
     await task_service.broadcast_task_event(retry_task, "task.updated")
     return retry_task
+
+
+@router.post("/{task_id}/reconcile")
+def reconcile_orchestrator_task(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    task = get_owned_task(db, task_id, current_user.id)
+    if not task_service.is_orchestrator_task(task):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Task is not an orchestrator",
+        )
+    return orchestrator_recovery_service.reconcile_orchestrator(task.id)
+
+
+@router.post("/{task_id}/cleanup")
+def cleanup_orchestrator_task(
+    task_id: int,
+    force: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    task = get_owned_task(db, task_id, current_user.id)
+    if not task_service.is_orchestrator_task(task):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Task is not an orchestrator",
+        )
+    return orchestrator_recovery_service.cleanup_terminal_orchestrator(
+        task.id,
+        force=force,
+    )

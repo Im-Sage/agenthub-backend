@@ -320,6 +320,55 @@ class WorktreeService:
             if self._branch_exists(branch_name):
                 self._repo.git.branch("-D", branch_name)
 
+    def cleanup_integration_branch(
+        self,
+        worktree_path: str | Path,
+        branch_name: str,
+    ) -> None:
+        if (
+            not branch_name.startswith("agent/orchestrator-")
+            or not branch_name.endswith("/integration")
+        ):
+            raise ValueError(
+                f"Refusing to delete non-integration branch: {branch_name}"
+            )
+        self.remove_worktree(worktree_path)
+        with self._lock_factory(self.repository_id):
+            if self._branch_exists(branch_name):
+                self._repo.git.branch("-D", branch_name)
+
+    def worktree_exists(self, worktree_path: str | Path) -> bool:
+        path = self._validated_worktree_path(worktree_path)
+        return path in self._registered_worktrees() and path.exists()
+
+    def abort_cherry_pick(self, worktree_path: str | Path) -> bool:
+        path = self._validated_worktree_path(worktree_path)
+        if not self.worktree_exists(path):
+            return False
+        with Repo(path) as worktree_repo:
+            cherry_pick_head = (
+                Path(worktree_repo.git_dir) / "CHERRY_PICK_HEAD"
+            )
+            if not cherry_pick_head.exists():
+                return False
+            worktree_repo.git.cherry_pick("--abort")
+            return True
+
+    def commit_is_ancestor(
+        self,
+        commit_hash: str,
+        revision: str,
+    ) -> bool:
+        try:
+            self._repo.git.merge_base(
+                "--is-ancestor",
+                commit_hash,
+                revision,
+            )
+        except GitCommandError:
+            return False
+        return True
+
     def prune(self) -> None:
         with self._lock_factory(self.repository_id):
             self._repo.git.worktree("prune")

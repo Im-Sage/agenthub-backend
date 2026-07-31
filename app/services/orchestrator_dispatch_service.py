@@ -65,7 +65,11 @@ def _metadata(task: Task) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def dispatch_orchestrator_execution(parent_task_id: int) -> dict:
+def dispatch_orchestrator_execution(
+    parent_task_id: int,
+    *,
+    start_wave_index: int = 0,
+) -> dict:
     with SessionLocal() as db:
         parent = db.scalar(
             select(Task)
@@ -90,6 +94,7 @@ def dispatch_orchestrator_execution(parent_task_id: int) -> dict:
                     "step_ids": list(wave.step_ids),
                 }
                 for wave in build_execution_waves(plan.steps)
+                if wave.index >= start_wave_index
             ]
             children = list(
                 db.scalars(
@@ -119,4 +124,3 @@ def dispatch_orchestrator_execution(parent_task_id: int) -> dict:
             parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
             db.commit()
             return {"status": "failed", "error": str(exc)}
-

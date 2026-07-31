@@ -1,0 +1,362 @@
+import asyncio
+import json
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+
+from app.db.session import SessionLocal
+from app.models.code_change import CodeChange
+from app.models.conversation import Conversation
+from app.models.repository import Repository
+from app.models.task import Task
+from app.schemas.enums import CodeChangeStatus, TaskStatus
+from app.services import task_service
+from app.services.worktree_service import WorktreeService
+from app.workers.celery_app import celery_app
+
+
+def _metadata(task: Task) -> dict:
+    try:
+        value = json.loads(task.metadata_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _children(db, parent_task_id: int) -> list[Task]:
+    return list(
+        db.scalars(
+            select(Task)
+            .where(Task.parent_task_id == parent_task_id)
+            .order_by(Task.step_index.asc(), Task.id.asc())
+        )
+    )
+
+
+def _repository(db, parent: Task) -> Repository:
+    conversation = db.get(Conversation, parent.conversation_id)
+    if conversation is None or conversation.repository_id is None:
+        raise RuntimeError("Orchestrator task requires a repository")
+    repository = db.get(Repository, conversation.repository_id)
+    if repository is None:
+        raise RuntimeError("Orchestrator repository was not found")
+    return repository
+
+
+def _service(repository: Repository) -> WorktreeService:
+    return WorktreeService(
+        repository_id=repository.id,
+        user_id=repository.user_id,
+        repository_path=repository.local_path,
+    )
+
+
+def _broadcast_recovery_logs(parent: Task, actions: list[str]) -> None:
+    for action in actions:
+        asyncio.run(task_service.broadcast_task_log(parent, action))
+
+
+def _persist_recovery_failure(
+    parent_task_id: int,
+    error: str,
+    *,
+    plan_status: str,
+    status: TaskStatus | None = None,
+) -> None:
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_task_id)
+        if parent is None:
+            return
+        metadata = _metadata(parent)
+        metadata["plan_status"] = plan_status
+        parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        parent.error_message = error
+        if status is not None:
+            parent.status = status
+        db.commit()
+
+
+def _cleanup_safe_step_worktrees(parent_task_id: int) -> None:
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_task_id)
+        if parent is None:
+            return
+        repository = _repository(db, parent)
+        with _service(repository) as worktrees:
+            for child in _children(db, parent.id):
+                safe = (
+                    child.celery_task_id is None
+                    or child.merge_status == "merged"
+                )
+                if not safe:
+                    continue
+                if child.worktree_path:
+                    worktrees.remove_worktree(child.worktree_path)
+                if child.branch_name:
+                    worktrees.cleanup_step_branch(child.branch_name)
+            worktrees.prune()
+
+
+def cancel_orchestrator(parent_task_id: int) -> dict:
+    revoke_ids: set[str] = set()
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_task_id)
+        if parent is None:
+            return {"status": "failed", "error": "parent task not found"}
+        metadata = _metadata(parent)
+        for task_id in (
+            metadata.get("canvas_id"),
+            parent.celery_task_id,
+        ):
+            if task_id:
+                revoke_ids.add(str(task_id))
+        now = datetime.now(UTC)
+        parent.status = TaskStatus.CANCELLED
+        parent.finished_at = now
+        for child in _children(db, parent.id):
+            if child.celery_task_id:
+                revoke_ids.add(str(child.celery_task_id))
+            if child.status in (
+                TaskStatus.PENDING,
+                TaskStatus.PENDING.value,
+                TaskStatus.RUNNING,
+                TaskStatus.RUNNING.value,
+            ):
+                child.status = TaskStatus.CANCELLED
+                child.finished_at = now
+        db.commit()
+
+    cleanup_error = None
+    try:
+        for task_id in sorted(revoke_ids):
+            celery_app.control.revoke(task_id, terminate=True)
+        _cleanup_safe_step_worktrees(parent_task_id)
+    except Exception as exc:
+        cleanup_error = str(exc)
+        _persist_recovery_failure(
+            parent_task_id,
+            cleanup_error,
+            plan_status="cancellation_cleanup_failed",
+        )
+    result = {
+        "status": "cancelled",
+        "revoked_task_ids": sorted(revoke_ids),
+    }
+    if cleanup_error:
+        result["cleanup_error"] = cleanup_error
+    return result
+
+
+def retry_failed_orchestrator(parent_task_id: int) -> str:
+    from app.services import orchestrator_dispatch_service
+
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_task_id)
+        if parent is None:
+            raise RuntimeError("parent task not found")
+        if parent.status not in (
+            TaskStatus.FAILED,
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED,
+            TaskStatus.CANCELLED.value,
+        ):
+            raise ValueError(
+                "Only FAILED or CANCELLED orchestrators can be retried"
+            )
+        children = _children(db, parent.id)
+        incomplete = [
+            child
+            for child in children
+            if not (
+                child.status in (
+                    TaskStatus.SUCCESS,
+                    TaskStatus.SUCCESS.value,
+                )
+                and child.merge_status == "merged"
+            )
+        ]
+        first_wave = min(
+            (
+                child.wave_index
+                for child in incomplete
+                if child.wave_index is not None
+            ),
+            default=0,
+        )
+        for child in incomplete:
+            child.status = TaskStatus.PENDING
+            child.celery_task_id = None
+            child.result_commit_hash = None
+            child.merge_status = "pending"
+            child.verification_result_json = None
+            child.result_summary = None
+            child.error_message = None
+            child.started_at = None
+            child.finished_at = None
+        metadata = _metadata(parent)
+        metadata["canvas_id"] = None
+        metadata["plan_status"] = "retrying"
+        metadata["retry_start_wave"] = first_wave
+        parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        parent.status = TaskStatus.RUNNING
+        parent.error_message = None
+        parent.finished_at = None
+        db.commit()
+
+    result = orchestrator_dispatch_service.dispatch_orchestrator_execution(
+        parent_task_id,
+        start_wave_index=first_wave,
+    )
+    if result.get("status") != "dispatched":
+        error = result.get("error") or "retry dispatch failed"
+        _persist_recovery_failure(
+            parent_task_id,
+            error,
+            plan_status="retry_dispatch_failed",
+            status=TaskStatus.FAILED,
+        )
+        raise RuntimeError(error)
+    return str(result["canvas_id"])
+
+
+def reconcile_orchestrator(parent_task_id: int) -> dict:
+    actions: list[str] = []
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_task_id)
+        if parent is None:
+            return {"status": "failed", "error": "parent task not found"}
+        metadata = _metadata(parent)
+        try:
+            repository = _repository(db, parent)
+            children = _children(db, parent.id)
+            with _service(repository) as worktrees:
+                integration_path = metadata.get(
+                    "integration_worktree_path"
+                )
+                integration_branch = metadata.get(
+                    "integration_branch_name"
+                )
+                if (
+                    integration_path
+                    and worktrees.abort_cherry_pick(integration_path)
+                ):
+                    actions.append(
+                        "aborted residual integration cherry-pick"
+                    )
+                for child in children:
+                    if child.worktree_path and worktrees.abort_cherry_pick(
+                        child.worktree_path
+                    ):
+                        actions.append(
+                            f"aborted residual cherry-pick for {child.step_key}"
+                        )
+                    if (
+                        child.merge_status != "merged"
+                        and child.base_commit_hash
+                        and (
+                            not child.worktree_path
+                            or not worktrees.worktree_exists(
+                                child.worktree_path
+                            )
+                        )
+                    ):
+                        handle = worktrees.ensure_step_worktree(
+                            parent.id,
+                            child.step_key,
+                            child.base_commit_hash,
+                        )
+                        child.worktree_path = handle.path
+                        child.branch_name = handle.branch_name
+                        actions.append(
+                            f"recreated missing worktree for {child.step_key}"
+                        )
+                    if (
+                        child.result_commit_hash
+                        and integration_branch
+                        and worktrees.commit_is_ancestor(
+                            child.result_commit_hash,
+                            integration_branch,
+                        )
+                    ):
+                        if child.merge_status != "merged":
+                            child.merge_status = "merged"
+                            actions.append(
+                                f"reconciled merged commit for {child.step_key}"
+                            )
+                    elif child.merge_status == "merged":
+                        child.merge_status = "ready"
+                        actions.append(
+                            f"reopened missing merge for {child.step_key}"
+                        )
+                worktrees.prune()
+            db.commit()
+            _broadcast_recovery_logs(parent, actions)
+            return {"status": "reconciled", "actions": actions}
+        except Exception as exc:
+            parent.error_message = str(exc)
+            db.commit()
+            return {"status": "failed", "error": str(exc), "actions": actions}
+
+
+def cleanup_terminal_orchestrator(
+    parent_task_id: int,
+    force: bool = False,
+) -> dict:
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_task_id)
+        if parent is None:
+            return {"status": "failed", "error": "parent task not found"}
+        if parent.status not in (
+            TaskStatus.SUCCESS,
+            TaskStatus.SUCCESS.value,
+            TaskStatus.FAILED,
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED,
+            TaskStatus.CANCELLED.value,
+        ):
+            return {"status": "skipped", "reason": "task is not terminal"}
+        metadata = _metadata(parent)
+        code_change = (
+            db.get(CodeChange, metadata["code_change_id"])
+            if metadata.get("code_change_id")
+            else None
+        )
+        protected_statuses = {
+            CodeChangeStatus.GENERATED,
+            CodeChangeStatus.GENERATED.value,
+            CodeChangeStatus.ACCEPTED,
+            CodeChangeStatus.ACCEPTED.value,
+            CodeChangeStatus.COMMITTED,
+            CodeChangeStatus.COMMITTED.value,
+        }
+        integration_preserved = (
+            code_change is not None
+            and code_change.status in protected_statuses
+        )
+        try:
+            repository = _repository(db, parent)
+            with _service(repository) as worktrees:
+                for child in _children(db, parent.id):
+                    if child.worktree_path:
+                        worktrees.remove_worktree(child.worktree_path)
+                    if child.branch_name:
+                        worktrees.cleanup_step_branch(child.branch_name)
+                if (
+                    force
+                    and not integration_preserved
+                    and metadata.get("integration_worktree_path")
+                    and metadata.get("integration_branch_name")
+                ):
+                    worktrees.cleanup_integration_branch(
+                        metadata["integration_worktree_path"],
+                        metadata["integration_branch_name"],
+                    )
+                worktrees.prune()
+            return {
+                "status": "cleaned",
+                "integration_preserved": integration_preserved,
+            }
+        except Exception as exc:
+            parent.error_message = str(exc)
+            db.commit()
+            return {"status": "failed", "error": str(exc)}

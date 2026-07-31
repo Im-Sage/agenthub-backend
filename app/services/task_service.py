@@ -335,6 +335,17 @@ def get_orchestrator_plan(task: Task) -> dict:
     }
 
 
+def is_orchestrator_task(task: Task) -> bool:
+    metadata = get_task_metadata(task)
+    return bool(
+        isinstance(metadata.get("plan"), list)
+        or (
+            getattr(task, "agent", None) is not None
+            and task.agent.adapter_type == "langgraph"
+        )
+    )
+
+
 def confirm_orchestrator_plan(db: Session, task: Task) -> Task:
     metadata = get_task_metadata(task)
     if metadata.get("plan_status") != "awaiting_confirmation":

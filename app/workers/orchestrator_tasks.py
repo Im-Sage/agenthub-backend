@@ -67,5 +67,11 @@ def cleanup_orchestrator_worktrees(
     parent_task_id: int,
     force: bool = False,
 ) -> dict:
-    return execution_service.cleanup_worktrees(parent_task_id, force=force)
+    from app.services.orchestrator_recovery_service import (
+        cleanup_terminal_orchestrator,
+    )
 
+    return cleanup_terminal_orchestrator(
+        parent_task_id,
+        force=force,
+    )
