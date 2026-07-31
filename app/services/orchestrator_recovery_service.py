@@ -213,6 +213,7 @@ def retry_failed_orchestrator(parent_task_id: int) -> str:
         metadata = _metadata(parent)
         metadata["execution_generation"] = generation
         metadata["canvas_id"] = None
+        metadata["execution_id"] = None
         metadata["plan_status"] = "retrying"
         metadata["retry_start_wave"] = first_wave
         parent.metadata_json = json.dumps(metadata, ensure_ascii=False)

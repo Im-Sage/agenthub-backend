@@ -22,6 +22,7 @@ def build_orchestrator_canvas(
     parent_task_id: int,
     children: list[Task],
     waves: list[dict],
+    execution_generation: int = 0,
 ):
     child_ids = {child.step_key: child.id for child in children}
     task_ids = []
@@ -31,7 +32,8 @@ def build_orchestrator_canvas(
         task_ids.append(task_id)
         return signature.set(task_id=task_id)
 
-    workflow = [tracked(prepare_orchestrator_execution.si(parent_task_id))]
+    prepare_args = (parent_task_id, execution_generation) if execution_generation else (parent_task_id,)
+    workflow = [tracked(prepare_orchestrator_execution.si(*prepare_args))]
     for wave in waves:
         wave_index = wave["index"]
         try:
@@ -45,23 +47,17 @@ def build_orchestrator_canvas(
             ) from exc
         workflow.extend(
             [
-                tracked(prepare_orchestrator_wave.si(
-                    parent_task_id,
-                    wave_index,
-                )),
+                tracked(prepare_orchestrator_wave.si(parent_task_id, wave_index, *([execution_generation] if execution_generation else []))),
                 chord(
                     group(
-                        tracked(run_orchestrator_step.si(child_id))
+                        tracked(run_orchestrator_step.si(child_id, *([execution_generation] if execution_generation else [])))
                         for child_id in step_child_ids
                     ),
-                    tracked(merge_orchestrator_wave.si(
-                        parent_task_id,
-                        wave_index,
-                    )),
+                    tracked(merge_orchestrator_wave.si(parent_task_id, wave_index, *([execution_generation] if execution_generation else []))),
                 ),
             ]
         )
-    workflow.append(tracked(finalize_orchestrator_execution.si(parent_task_id)))
+    workflow.append(tracked(finalize_orchestrator_execution.si(parent_task_id, *([execution_generation] if execution_generation else []))))
     canvas = chain(*workflow)
     canvas._orchestrator_task_ids = task_ids
     return canvas
@@ -113,21 +109,26 @@ def dispatch_orchestrator_execution(
                     .order_by(Task.step_index.asc(), Task.id.asc())
                 ).all()
             )
+            generation = int(metadata.get("execution_generation", 0)) or 1
+            execution_id = metadata.get("execution_id") or str(uuid4())
             canvas = build_orchestrator_canvas(
                 parent_task_id,
                 children,
                 waves,
+                generation,
             )
-            root_result = canvas.apply_async()
             task_ids = list(getattr(canvas, "_orchestrator_task_ids", ()))
-            metadata["canvas_task_ids"] = task_ids or [root_result.id]
-            metadata["canvas_id"] = metadata["canvas_task_ids"][0]
+            metadata["execution_generation"] = generation
+            metadata["execution_id"] = execution_id
+            metadata["canvas_task_ids"] = task_ids
+            metadata["canvas_id"] = execution_id
             metadata["plan_status"] = "dispatch_queued"
             parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
             db.commit()
+            canvas.apply_async()
             return {
                 "status": "dispatched",
-                "canvas_id": root_result.id,
+                "canvas_id": execution_id,
             }
         except Exception as exc:
             parent.status = TaskStatus.FAILED

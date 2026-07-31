@@ -189,4 +189,4 @@ def test_enqueue_failure_is_persisted(monkeypatch):
     assert parent.status == TaskStatus.FAILED
     assert parent.error_message == "broker unavailable"
     assert json.loads(parent.metadata_json)["plan_status"] == "dispatch_failed"
-    assert db.commits == 1
+    assert db.commits == 2

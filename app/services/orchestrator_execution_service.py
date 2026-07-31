@@ -48,6 +48,10 @@ def _execution_generation(task: Task) -> int:
     return int(_metadata(task).get("execution_generation", 0))
 
 
+def _is_current_generation(parent: Task, expected_generation: int) -> bool:
+    return _execution_generation(parent) == expected_generation
+
+
 def _repository(db, task: Task) -> Repository:
     conversation = db.get(Conversation, task.conversation_id)
     if conversation is None or conversation.repository_id is None:
@@ -76,11 +80,13 @@ def _children(db, parent_task_id: int) -> list[Task]:
     )
 
 
-def prepare_execution(parent_task_id: int) -> dict:
+def prepare_execution(parent_task_id: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
         parent = db.get(Task, parent_task_id)
         if parent is None:
             return {"status": "failed", "error": "parent task not found"}
+        if not _is_current_generation(parent, expected_generation):
+            return {"status": "skipped", "reason": "stale execution"}
         metadata = _metadata(parent)
         if metadata.get("integration_worktree_path"):
             return {"status": "prepared", **metadata}
@@ -134,11 +140,13 @@ def prepare_execution(parent_task_id: int) -> dict:
             return {"status": "failed", "error": str(exc)}
 
 
-def prepare_wave(parent_task_id: int, wave_index: int) -> dict:
+def prepare_wave(parent_task_id: int, wave_index: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
         parent = db.get(Task, parent_task_id)
         if parent is None:
             return {"status": "failed", "error": "parent task not found"}
+        if not _is_current_generation(parent, expected_generation):
+            return {"status": "skipped", "reason": "stale execution"}
         if parent.status in (TaskStatus.FAILED, TaskStatus.CANCELLED):
             return {"status": "skipped", "reason": "parent is terminal"}
         metadata = _metadata(parent)
@@ -186,6 +194,7 @@ def _changed_files(path: str) -> list[str]:
 def execute_step(
     child_task_id: int,
     celery_task_id: str,
+    expected_generation: int = 0,
 ) -> StepExecutionOutcome:
     with SessionLocal() as db:
         child = db.get(Task, child_task_id)
@@ -210,7 +219,8 @@ def execute_step(
             child.status = TaskStatus.CANCELLED
             db.commit()
             return StepExecutionOutcome(child.id, "CANCELLED", None, (), None, None)
-        expected_generation = _execution_generation(parent)
+        if expected_generation == 0:
+            expected_generation = _execution_generation(parent)
         child.celery_task_id = celery_task_id
         child.status = TaskStatus.RUNNING
         child.started_at = _utcnow()
@@ -324,6 +334,18 @@ def execute_step(
                 None,
             )
         except Exception as exc:
+            latest_parent = db.get(Task, child.parent_task_id)
+            latest_child = db.get(Task, child.id)
+            if (
+                latest_parent is None
+                or latest_child is None
+                or latest_parent.status == TaskStatus.CANCELLED
+                or not _is_current_generation(latest_parent, expected_generation)
+                or _execution_generation(latest_child) != expected_generation
+            ):
+                return StepExecutionOutcome(
+                    child.id, "CANCELLED", None, (), None, None
+                )
             child.status = TaskStatus.FAILED
             child.error_message = str(exc)
             child.finished_at = _utcnow()
@@ -333,11 +355,13 @@ def execute_step(
             )
 
 
-def merge_wave(parent_task_id: int, wave_index: int) -> dict:
+def merge_wave(parent_task_id: int, wave_index: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
         parent = db.get(Task, parent_task_id)
         if parent is None:
             return {"status": "failed", "error": "parent task not found"}
+        if not _is_current_generation(parent, expected_generation):
+            return {"status": "skipped", "reason": "stale execution"}
         children = [
             child for child in _children(db, parent.id)
             if child.wave_index == wave_index
@@ -390,11 +414,13 @@ def merge_wave(parent_task_id: int, wave_index: int) -> dict:
             return {"status": "failed", "error": str(exc)}
 
 
-def finalize_execution(parent_task_id: int) -> dict:
+def finalize_execution(parent_task_id: int, expected_generation: int = 0) -> dict:
     with SessionLocal() as db:
         parent = db.get(Task, parent_task_id)
         if parent is None:
             return {"status": "failed", "error": "parent task not found"}
+        if not _is_current_generation(parent, expected_generation):
+            return {"status": "skipped", "reason": "stale execution"}
         metadata = _metadata(parent)
         if metadata.get("code_change_id"):
             return {"status": "success", "code_change_id": metadata["code_change_id"]}

@@ -11,8 +11,10 @@ from app.workers.celery_app import celery_app
         "prepare_orchestrator_execution"
     )
 )
-def prepare_orchestrator_execution(parent_task_id: int) -> dict:
-    return execution_service.prepare_execution(parent_task_id)
+def prepare_orchestrator_execution(parent_task_id: int, execution_generation: int = 0) -> dict:
+    if execution_generation == 0:
+        return execution_service.prepare_execution(parent_task_id)
+    return execution_service.prepare_execution(parent_task_id, execution_generation)
 
 
 @celery_app.task(
@@ -20,9 +22,11 @@ def prepare_orchestrator_execution(parent_task_id: int) -> dict:
 )
 def prepare_orchestrator_wave(
     parent_task_id: int,
-    wave_index: int,
+    wave_index: int, execution_generation: int = 0,
 ) -> dict:
-    return execution_service.prepare_wave(parent_task_id, wave_index)
+    if execution_generation == 0:
+        return execution_service.prepare_wave(parent_task_id, wave_index)
+    return execution_service.prepare_wave(parent_task_id, wave_index, execution_generation)
 
 
 @celery_app.task(
@@ -30,11 +34,11 @@ def prepare_orchestrator_wave(
     name="app.workers.orchestrator_tasks.run_orchestrator_step",
     max_retries=settings.orchestrator_step_max_retries,
 )
-def run_orchestrator_step(self, child_task_id: int) -> dict:
-    outcome = execution_service.execute_step(
-        child_task_id,
-        str(self.request.id),
-    )
+def run_orchestrator_step(self, child_task_id: int, execution_generation: int = 0) -> dict:
+    if execution_generation == 0:
+        outcome = execution_service.execute_step(child_task_id, str(self.request.id))
+    else:
+        outcome = execution_service.execute_step(child_task_id, str(self.request.id), execution_generation)
     result = asdict(outcome)
     result["changed_files"] = list(outcome.changed_files)
     return result
@@ -45,9 +49,11 @@ def run_orchestrator_step(self, child_task_id: int) -> dict:
 )
 def merge_orchestrator_wave(
     parent_task_id: int,
-    wave_index: int,
+    wave_index: int, execution_generation: int = 0,
 ) -> dict:
-    return execution_service.merge_wave(parent_task_id, wave_index)
+    if execution_generation == 0:
+        return execution_service.merge_wave(parent_task_id, wave_index)
+    return execution_service.merge_wave(parent_task_id, wave_index, execution_generation)
 
 
 @celery_app.task(
@@ -56,8 +62,10 @@ def merge_orchestrator_wave(
         "finalize_orchestrator_execution"
     )
 )
-def finalize_orchestrator_execution(parent_task_id: int) -> dict:
-    return execution_service.finalize_execution(parent_task_id)
+def finalize_orchestrator_execution(parent_task_id: int, execution_generation: int = 0) -> dict:
+    if execution_generation == 0:
+        return execution_service.finalize_execution(parent_task_id)
+    return execution_service.finalize_execution(parent_task_id, execution_generation)
 
 
 @celery_app.task(

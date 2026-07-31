@@ -343,7 +343,10 @@ def is_orchestrator_task(task: Task) -> bool:
         "dispatch_failed", "execution_failed", "verification_failed",
         "executed",
     }
-    if metadata.get("plan_status") not in execution_statuses:
+    if (
+        metadata.get("execution_generation") is None
+        and metadata.get("plan_status") not in execution_statuses
+    ):
         return False
     if not isinstance(plan, list) or not plan:
         return False
