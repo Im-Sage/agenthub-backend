@@ -334,8 +334,14 @@ def execute_step(
                 None,
             )
         except Exception as exc:
-            latest_parent = db.get(Task, child.parent_task_id)
-            latest_child = db.get(Task, child.id)
+            latest_parent = db.scalar(
+                select(Task).where(Task.id == child.parent_task_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )
+            latest_child = db.scalar(
+                select(Task).where(Task.id == child.id)
+                .with_for_update().execution_options(populate_existing=True)
+            )
             if (
                 latest_parent is None
                 or latest_child is None
@@ -343,9 +349,7 @@ def execute_step(
                 or not _is_current_generation(latest_parent, expected_generation)
                 or _execution_generation(latest_child) != expected_generation
             ):
-                return StepExecutionOutcome(
-                    child.id, "CANCELLED", None, (), None, None
-                )
+                return StepExecutionOutcome(child.id, "CANCELLED", None, (), None, None)
             child.status = TaskStatus.FAILED
             child.error_message = str(exc)
             child.finished_at = _utcnow()

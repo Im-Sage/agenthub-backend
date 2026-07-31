@@ -114,6 +114,10 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
                 revoke_ids.add(str(task_id))
         if parent.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
             return {"status": "conflict", "error": "task is terminal"}
+        metadata["execution_generation"] = int(
+            metadata.get("execution_generation", 0)
+        ) + 1
+        parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
         now = datetime.now(UTC)
         parent.status = TaskStatus.CANCELLED
         parent.finished_at = now
@@ -144,9 +148,13 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
     except Exception as exc:
         cleanup_error = str(exc)
     if cleanup_error or failed_revocations:
+        errors = {
+            "cleanup_error": cleanup_error,
+            "failed_revocations": failed_revocations,
+        }
         _persist_recovery_failure(
             parent_task_id,
-            cleanup_error or json.dumps(failed_revocations, ensure_ascii=False),
+            json.dumps(errors, ensure_ascii=False),
             plan_status="cancellation_cleanup_failed",
         )
     result = {

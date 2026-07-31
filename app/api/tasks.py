@@ -162,7 +162,12 @@ async def retry_task(
     task = get_owned_task(db, task_id, current_user.id)
     task_service.ensure_user_task_capacity(db, current_user.id)
     if task.parent_task_id is None and task_service.is_orchestrator_task(task):
-        orchestrator_recovery_service.retry_failed_orchestrator(task.id)
+        try:
+            orchestrator_recovery_service.retry_failed_orchestrator(task.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         db.expire_all()
         retried = get_owned_task(db, task_id, current_user.id)
         await task_service.broadcast_task_event(retried, "task.updated")
