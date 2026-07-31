@@ -11,6 +11,7 @@ from app.tools.base import (
     ToolCallRequest,
     ToolDefinition,
     ToolRiskLevel,
+    ToolSource,
 )
 from app.tools.registry import tool_registry
 
@@ -140,16 +141,42 @@ def build_model_tools(
     if not has_workspace:
         return [], {}
 
-    allowed = AGENT_TOOL_PROFILES.get(
-        agent_code,
-        AGENT_TOOL_PROFILES["qwen"],
+    allowed = set(
+        AGENT_TOOL_PROFILES.get(
+            agent_code,
+            AGENT_TOOL_PROFILES["qwen"],
+        )
     )
+    dynamic_allowed: set[str] = set()
+    try:
+        configured_profiles = json.loads(
+            settings.mcp_dynamic_agent_profiles_json or "{}"
+        )
+        configured_names = (
+            configured_profiles.get(agent_code, [])
+            if isinstance(configured_profiles, dict)
+            else []
+        )
+        if isinstance(configured_names, list):
+            dynamic_allowed = {
+                name
+                for name in configured_names
+                if isinstance(name, str)
+            }
+    except (json.JSONDecodeError, TypeError):
+        dynamic_allowed = set()
 
     tools: list[dict[str, Any]] = []
     reverse_map: dict[str, str] = {}
 
     for definition in tool_registry.list_tools():
-        if definition.name not in allowed:
+        if (
+            definition.name not in allowed
+            and not (
+                definition.source == ToolSource.MCP
+                and definition.name in dynamic_allowed
+            )
+        ):
             continue
 
         if definition.risk_level == ToolRiskLevel.HIGH:
