@@ -9,6 +9,7 @@ from app.models.task import Task
 from app.schemas.enums import CodeChangeStatus, TaskStatus
 from app.services import orchestrator_dispatch_service
 from app.services import orchestrator_recovery_service as service
+from app.services import task_service
 
 
 class FakeSession:
@@ -309,3 +310,129 @@ def test_cleanup_preserves_integration_branch_for_generated_code_change(
     assert result["status"] == "cleaned"
     assert result["integration_preserved"] is True
     assert ("integration", "agent/orchestrator-100/integration") not in removed
+
+
+def test_retry_keeps_skipped_steps_and_starts_at_failed_later_wave(monkeypatch):
+    parent = _parent(TaskStatus.FAILED, {"canvas_id": "old"})
+    skipped = _child(
+        1,
+        TaskStatus.SUCCESS,
+        wave_index=0,
+        merge_status="skipped",
+    )
+    failed = _child(2, TaskStatus.FAILED, wave_index=1)
+    db = FakeSession(parent, [skipped, failed])
+    calls = []
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        orchestrator_dispatch_service,
+        "dispatch_orchestrator_execution",
+        lambda parent_id, start_wave_index=0: calls.append(start_wave_index)
+        or {"status": "dispatched", "canvas_id": "retry"},
+    )
+
+    service.retry_failed_orchestrator(parent.id)
+
+    assert skipped.status == TaskStatus.SUCCESS
+    assert skipped.merge_status == "skipped"
+    assert calls == [1]
+
+
+def test_cancel_is_terminal_safe_and_revokes_each_id(monkeypatch):
+    parent = _parent(
+        TaskStatus.RUNNING,
+        {"canvas_task_ids": ["canvas-a", "canvas-b"]},
+    )
+    child = _child(1, TaskStatus.RUNNING, celery_task_id="child")
+    db = FakeSession(parent, [child])
+    calls = []
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        service.celery_app.control,
+        "revoke",
+        lambda task_id, terminate: calls.append(task_id)
+        if task_id != "canvas-a"
+        else (_ for _ in ()).throw(RuntimeError("revoke failed")),
+    )
+    monkeypatch.setattr(service, "_cleanup_safe_step_worktrees", lambda _: None)
+
+    result = service.cancel_orchestrator(parent.id)
+
+    assert set(calls) == {"canvas-b", "resume-task", "child"}
+    assert result["failed_revocations"] == {"canvas-a": "revoke failed"}
+    assert parent.status == TaskStatus.CANCELLED
+
+    result = service.cancel_orchestrator(parent.id)
+    assert result["status"] == "conflict"
+    assert parent.status == TaskStatus.CANCELLED
+
+
+def test_reconcile_recreates_missing_integration_worktree(monkeypatch):
+    parent = _parent(
+        TaskStatus.RUNNING,
+        {
+            "integration_worktree_path": "missing-integration",
+            "integration_branch_name": "agent/orchestrator-100/integration",
+            "base_commit_hash": "base",
+        },
+    )
+    db = FakeSession(parent)
+    actions = []
+
+    class Worktrees:
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def worktree_exists(self, path): return False
+        def ensure_integration_worktree(self, parent_id, base):
+            actions.append((parent_id, base))
+            return SimpleNamespace(path="rebuilt-integration", branch_name="agent/orchestrator-100/integration")
+        def abort_cherry_pick(self, path): return False
+        def prune(self): return None
+
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(service, "_repository", lambda *_: object())
+    monkeypatch.setattr(service, "_service", lambda _: Worktrees())
+    monkeypatch.setattr(service, "_broadcast_recovery_logs", lambda *_: None)
+
+    result = service.reconcile_orchestrator(parent.id)
+
+    assert actions == [(100, "base")]
+    assert json.loads(parent.metadata_json)["integration_worktree_path"] == "rebuilt-integration"
+    assert any("integration" in action for action in result["actions"])
+
+
+def test_cleanup_preserves_failed_diagnostics_without_force(monkeypatch):
+    parent = _parent(TaskStatus.FAILED, {})
+    child = _child(1, TaskStatus.FAILED, worktree_path="step", branch_name="branch")
+    db = FakeSession(parent, [child])
+    removed = []
+    class Worktrees:
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def remove_worktree(self, path): removed.append(path)
+        def cleanup_step_branch(self, branch): removed.append(branch)
+        def prune(self): removed.append("prune")
+    monkeypatch.setattr(service, "SessionLocal", lambda: db)
+    monkeypatch.setattr(service, "_repository", lambda *_: object())
+    monkeypatch.setattr(service, "_service", lambda _: Worktrees())
+
+    assert service.cleanup_terminal_orchestrator(parent.id) == {
+        "status": "preserved", "reason": "terminal diagnostics are retained"
+    }
+    assert removed == []
+
+
+def test_only_valid_execution_phase_plan_is_recoverable():
+    task = SimpleNamespace(
+        metadata_json=json.dumps({
+            "plan_status": "awaiting_confirmation",
+            "plan": [{"id": "step", "agent": "backend", "instruction": "x", "depends_on": [], "write_scope": ["app/**"]}],
+        }),
+        agent=SimpleNamespace(adapter_type="langgraph"),
+    )
+    assert task_service.is_orchestrator_task(task) is False
+    task.metadata_json = json.dumps({
+        "plan_status": "dispatch_queued",
+        "plan": [{"id": "step", "agent": "backend", "instruction": "x", "depends_on": [], "write_scope": ["app/**"]}],
+    })
+    assert task_service.is_orchestrator_task(task) is True

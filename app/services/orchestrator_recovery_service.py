@@ -17,7 +17,7 @@ from app.workers.celery_app import celery_app
 
 def _metadata(task: Task) -> dict:
     try:
-        value = json.loads(task.metadata_json or "{}")
+        value = json.loads(getattr(task, "metadata_json", None) or "{}")
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
@@ -68,6 +68,7 @@ def _persist_recovery_failure(
         if parent is None:
             return
         metadata = _metadata(parent)
+        generation = int(metadata.get("execution_generation", 0)) + 1
         metadata["plan_status"] = plan_status
         parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
         parent.error_message = error
@@ -107,9 +108,12 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
         for task_id in (
             metadata.get("canvas_id"),
             parent.celery_task_id,
+            *(metadata.get("canvas_task_ids") or []),
         ):
             if task_id:
                 revoke_ids.add(str(task_id))
+        if parent.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            return {"status": "conflict", "error": "task is terminal"}
         now = datetime.now(UTC)
         parent.status = TaskStatus.CANCELLED
         parent.finished_at = now
@@ -127,21 +131,30 @@ def cancel_orchestrator(parent_task_id: int) -> dict:
         db.commit()
 
     cleanup_error = None
-    try:
-        for task_id in sorted(revoke_ids):
+    failed_revocations = {}
+    succeeded_revocations = []
+    for task_id in sorted(revoke_ids):
+        try:
             celery_app.control.revoke(task_id, terminate=True)
+            succeeded_revocations.append(task_id)
+        except Exception as exc:
+            failed_revocations[task_id] = str(exc)
+    try:
         _cleanup_safe_step_worktrees(parent_task_id)
     except Exception as exc:
         cleanup_error = str(exc)
+    if cleanup_error or failed_revocations:
         _persist_recovery_failure(
             parent_task_id,
-            cleanup_error,
+            cleanup_error or json.dumps(failed_revocations, ensure_ascii=False),
             plan_status="cancellation_cleanup_failed",
         )
     result = {
         "status": "cancelled",
-        "revoked_task_ids": sorted(revoke_ids),
+        "revoked_task_ids": succeeded_revocations,
     }
+    if failed_revocations:
+        result["failed_revocations"] = failed_revocations
     if cleanup_error:
         result["cleanup_error"] = cleanup_error
     return result
@@ -164,6 +177,7 @@ def retry_failed_orchestrator(parent_task_id: int) -> str:
                 "Only FAILED or CANCELLED orchestrators can be retried"
             )
         children = _children(db, parent.id)
+        generation = int(_metadata(parent).get("execution_generation", 0)) + 1
         incomplete = [
             child
             for child in children
@@ -172,7 +186,7 @@ def retry_failed_orchestrator(parent_task_id: int) -> str:
                     TaskStatus.SUCCESS,
                     TaskStatus.SUCCESS.value,
                 )
-                and child.merge_status == "merged"
+                and child.merge_status in ("merged", "skipped")
             )
         ]
         first_wave = min(
@@ -193,7 +207,11 @@ def retry_failed_orchestrator(parent_task_id: int) -> str:
             child.error_message = None
             child.started_at = None
             child.finished_at = None
+            child_metadata = _metadata(child)
+            child_metadata["execution_generation"] = generation
+            child.metadata_json = json.dumps(child_metadata, ensure_ascii=False)
         metadata = _metadata(parent)
+        metadata["execution_generation"] = generation
         metadata["canvas_id"] = None
         metadata["plan_status"] = "retrying"
         metadata["retry_start_wave"] = first_wave
@@ -236,6 +254,21 @@ def reconcile_orchestrator(parent_task_id: int) -> dict:
                 integration_branch = metadata.get(
                     "integration_branch_name"
                 )
+                if (
+                    integration_path
+                    and metadata.get("base_commit_hash")
+                    and not worktrees.worktree_exists(integration_path)
+                ):
+                    integration = worktrees.ensure_integration_worktree(
+                        parent.id,
+                        metadata["base_commit_hash"],
+                    )
+                    metadata["integration_worktree_path"] = integration.path
+                    metadata["integration_branch_name"] = integration.branch_name
+                    integration_path = integration.path
+                    integration_branch = integration.branch_name
+                    parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
+                    actions.append("recreated missing integration worktree")
                 if (
                     integration_path
                     and worktrees.abort_cherry_pick(integration_path)
@@ -315,6 +348,11 @@ def cleanup_terminal_orchestrator(
             TaskStatus.CANCELLED.value,
         ):
             return {"status": "skipped", "reason": "task is not terminal"}
+        if parent.status in (TaskStatus.FAILED, TaskStatus.CANCELLED) and not force:
+            return {
+                "status": "preserved",
+                "reason": "terminal diagnostics are retained",
+            }
         metadata = _metadata(parent)
         code_change = (
             db.get(CodeChange, metadata["code_change_id"])

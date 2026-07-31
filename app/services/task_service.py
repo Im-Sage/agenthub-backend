@@ -337,12 +337,20 @@ def get_orchestrator_plan(task: Task) -> dict:
 
 def is_orchestrator_task(task: Task) -> bool:
     metadata = get_task_metadata(task)
-    return bool(
-        isinstance(metadata.get("plan"), list)
-        or (
-            getattr(task, "agent", None) is not None
-            and task.agent.adapter_type == "langgraph"
-        )
+    plan = metadata.get("plan")
+    execution_statuses = {
+        "dispatched", "dispatch_queued", "retrying", "prepare_failed",
+        "dispatch_failed", "execution_failed", "verification_failed",
+        "executed",
+    }
+    if metadata.get("plan_status") not in execution_statuses:
+        return False
+    if not isinstance(plan, list) or not plan:
+        return False
+    return all(
+        isinstance(step, dict)
+        and all(key in step for key in ("id", "agent", "instruction"))
+        for step in plan
     )
 
 

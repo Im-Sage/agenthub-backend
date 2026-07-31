@@ -38,10 +38,14 @@ def _utcnow() -> datetime:
 
 def _metadata(task: Task) -> dict:
     try:
-        value = json.loads(task.metadata_json or "{}")
+        value = json.loads(getattr(task, "metadata_json", None) or "{}")
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _execution_generation(task: Task) -> int:
+    return int(_metadata(task).get("execution_generation", 0))
 
 
 def _repository(db, task: Task) -> Repository:
@@ -206,6 +210,7 @@ def execute_step(
             child.status = TaskStatus.CANCELLED
             db.commit()
             return StepExecutionOutcome(child.id, "CANCELLED", None, (), None, None)
+        expected_generation = _execution_generation(parent)
         child.celery_task_id = celery_task_id
         child.status = TaskStatus.RUNNING
         child.started_at = _utcnow()
@@ -268,8 +273,34 @@ def execute_step(
                         raise RuntimeError(
                             verification.failure_summary or "Verification failed"
                         )
-                if parent.status == TaskStatus.CANCELLED:
-                    raise RuntimeError("Parent task was cancelled")
+                locked_parent = db.scalar(
+                    select(Task)
+                    .where(Task.id == parent.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                locked_child = db.scalar(
+                    select(Task)
+                    .where(Task.id == child.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    locked_parent is None
+                    or locked_child is None
+                    or _execution_generation(locked_parent) != expected_generation
+                    or _execution_generation(locked_child) != expected_generation
+                ):
+                    return StepExecutionOutcome(
+                        child.id, "CANCELLED", None, (), None, None
+                    )
+                if locked_parent.status == TaskStatus.CANCELLED:
+                    locked_child.status = TaskStatus.CANCELLED
+                    locked_child.finished_at = _utcnow()
+                    db.commit()
+                    return StepExecutionOutcome(
+                        child.id, "CANCELLED", None, (), None, None
+                    )
                 committed = worktrees.commit_step_changes(
                     handle,
                     f"agent: execute {child.step_key}",

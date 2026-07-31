@@ -1,4 +1,5 @@
 import json
+from uuid import uuid4
 
 from celery import chain, chord, group
 from sqlalchemy import select
@@ -23,7 +24,14 @@ def build_orchestrator_canvas(
     waves: list[dict],
 ):
     child_ids = {child.step_key: child.id for child in children}
-    workflow = [prepare_orchestrator_execution.si(parent_task_id)]
+    task_ids = []
+
+    def tracked(signature):
+        task_id = str(uuid4())
+        task_ids.append(task_id)
+        return signature.set(task_id=task_id)
+
+    workflow = [tracked(prepare_orchestrator_execution.si(parent_task_id))]
     for wave in waves:
         wave_index = wave["index"]
         try:
@@ -37,24 +45,26 @@ def build_orchestrator_canvas(
             ) from exc
         workflow.extend(
             [
-                prepare_orchestrator_wave.si(
+                tracked(prepare_orchestrator_wave.si(
                     parent_task_id,
                     wave_index,
-                ),
+                )),
                 chord(
                     group(
-                        run_orchestrator_step.si(child_id)
+                        tracked(run_orchestrator_step.si(child_id))
                         for child_id in step_child_ids
                     ),
-                    merge_orchestrator_wave.si(
+                    tracked(merge_orchestrator_wave.si(
                         parent_task_id,
                         wave_index,
-                    ),
+                    )),
                 ),
             ]
         )
-    workflow.append(finalize_orchestrator_execution.si(parent_task_id))
-    return chain(*workflow)
+    workflow.append(tracked(finalize_orchestrator_execution.si(parent_task_id)))
+    canvas = chain(*workflow)
+    canvas._orchestrator_task_ids = task_ids
+    return canvas
 
 
 def _metadata(task: Task) -> dict:
@@ -109,7 +119,9 @@ def dispatch_orchestrator_execution(
                 waves,
             )
             root_result = canvas.apply_async()
-            metadata["canvas_id"] = root_result.id
+            task_ids = list(getattr(canvas, "_orchestrator_task_ids", ()))
+            metadata["canvas_task_ids"] = task_ids or [root_result.id]
+            metadata["canvas_id"] = metadata["canvas_task_ids"][0]
             metadata["plan_status"] = "dispatch_queued"
             parent.metadata_json = json.dumps(metadata, ensure_ascii=False)
             db.commit()
